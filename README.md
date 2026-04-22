@@ -18,8 +18,8 @@ This project was inspired by [caffeinexz/Tele2Rub](https://github.com/caffeinexz
 - Shows upload percentage progress, status updates, and retry attempts for temporary failures
 - Supports canceling a job with `/cancel`
 - Sends files to Rubika Saved Messages
-- Keeps important file extensions for common media and archive formats
-- Removes the extension from unsupported names before upload when needed
+- Tries the original filename for every upload, including generic files
+- Falls back to removing unsupported extensions only when Rubika needs it
 
 ## How It Works
 
@@ -339,8 +339,8 @@ This makes the system easy to inspect and debug manually.
 ## Notes
 
 - Files are uploaded to Rubika as documents
-- Some file extensions are preserved to improve compatibility
-- For unsupported names, the worker may remove the extension before sending
+- The worker first keeps the original filename for all uploads
+- If Rubika rejects an uncommon extension, the worker retries without the extension
 - Upload progress is driven by Rubika chunk callbacks and shown as a percent during transfer
 
 ## Troubleshooting

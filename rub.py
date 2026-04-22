@@ -33,7 +33,7 @@ TARGET = "me"
 ensure_storage_dirs()
 
 
-KEEP_EXTENSIONS = {
+COMMON_RUBIKA_SAFE_EXTENSIONS = {
     ".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".m4v",
     ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp",
     ".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac",
@@ -50,21 +50,6 @@ def remove_extension(name: str) -> str:
     if "." in name:
         name = name.rsplit(".", 1)[0]
     return name or "file"
-
-
-def unique_path(path: Path) -> Path:
-    if not path.exists():
-        return path
-
-    stem = path.stem
-    suffix = path.suffix
-    index = 1
-
-    while True:
-        candidate = path.with_name(f"{stem}_{index}{suffix}")
-        if not candidate.exists():
-            return candidate
-        index += 1
 
 
 def has_session(session_name: str) -> bool:
@@ -89,7 +74,7 @@ def ensure_session():
 
 
 def should_keep_extension(filename: str) -> bool:
-    return Path(filename).suffix.lower() in KEEP_EXTENSIONS
+    return Path(filename).suffix.lower() in COMMON_RUBIKA_SAFE_EXTENSIONS
 
 
 def update_telegram_status(
@@ -132,14 +117,19 @@ def update_telegram_status(
         pass
 
 
-async def send_document(file_path: str, caption: str = "", callback=None):
+async def send_document(
+    file_path: str,
+    caption: str = "",
+    callback=None,
+    file_name: str | None = None,
+):
     async with RubikaClient(name=SESSION) as client:
         return await client.send_document(
             TARGET,
             file_path,
             caption=caption or "",
             callback=callback,
-            file_name=Path(file_path).name,
+            file_name=file_name or Path(file_path).name,
         )
 
 
@@ -204,7 +194,12 @@ def make_upload_progress_callback(task: dict, attempt: int):
     return callback
 
 
-def send_with_retry(task: dict, file_path: str, caption: str = ""):
+def send_with_retry(
+    task: dict,
+    file_path: str,
+    caption: str = "",
+    file_name: str | None = None,
+):
     task_id = task.get("task_id", "")
     last_error = None
 
@@ -229,6 +224,7 @@ def send_with_retry(task: dict, file_path: str, caption: str = ""):
                     file_path,
                     caption,
                     callback=make_upload_progress_callback(task, attempt),
+                    file_name=file_name,
                 )
             )
         except Exception as e:
@@ -267,6 +263,7 @@ def process_task(task: dict) -> None:
         raise RuntimeError("Local file not found.")
 
     send_path = original_path
+    send_name = task.get("file_name") or original_path.name
 
     try:
         if is_cancelled(task_id):
@@ -279,21 +276,33 @@ def process_task(task: dict) -> None:
             note="آپلود تا چند لحظه دیگر شروع می‌شود.",
         )
 
-        if not should_keep_extension(original_path.name):
-            clean_name = remove_extension(original_path.name)
-            renamed_path = unique_path(original_path.parent / clean_name)
+        task["file_name"] = send_name
+        save_processing(task)
 
-            try:
-                original_path.rename(renamed_path)
-                send_path = renamed_path
-                task["path"] = str(send_path)
-                task["file_name"] = send_path.name
-                task["upload_percent"] = 0
-                save_processing(task)
-            except Exception:
-                send_path = original_path
+        try:
+            send_with_retry(task, str(send_path), caption, file_name=send_name)
+        except CancelledTaskError:
+            raise
+        except Exception:
+            fallback_name = remove_extension(send_name)
+            needs_fallback = (
+                fallback_name != send_name and not should_keep_extension(send_name)
+            )
+            if not needs_fallback:
+                raise
 
-        send_with_retry(task, str(send_path), caption)
+            task["upload_percent"] = 0
+            task["file_name"] = fallback_name
+            task["attempt_text"] = None
+            save_processing(task)
+            update_telegram_status(
+                task,
+                stage="تلاش دوباره با نام سازگار",
+                upload_status="نام فایل برای روبیکا تنظیم شد",
+                note="این فایل ابتدا با نام اصلی ارسال شد و حالا بدون پسوند دوباره تلاش می‌شود.",
+            )
+            send_name = fallback_name
+            send_with_retry(task, str(send_path), caption, file_name=send_name)
     except CancelledTaskError:
         cleanup_local_file(str(send_path))
         clear_cancelled(task_id)
