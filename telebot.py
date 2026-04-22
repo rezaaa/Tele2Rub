@@ -140,10 +140,11 @@ def make_download_progress_callback(task_id: str, status_message: Message, task_
     loop = asyncio.get_running_loop()
     state = {"last_percent": -1, "last_update": 0.0}
 
-    def progress(current: int, total: int, *_args) -> None:
+    def progress(current: int, total: int, client: Client, *_args) -> None:
         active = ACTIVE_DOWNLOADS.get(task_id)
         if active and active.get("cancelled"):
-            raise RuntimeError("Cancelled by user.")
+            client.stop_transmission()
+            return
 
         if total <= 0:
             return
@@ -319,6 +320,7 @@ async def media_handler(client: Client, message: Message):
                 status,
                 {"file_name": file_name, "file_size": file_size},
             ),
+            progress_args=(client,),
         )
 
         if ACTIVE_DOWNLOADS.get(task_id, {}).get("cancelled"):
