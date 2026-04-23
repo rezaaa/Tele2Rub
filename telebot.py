@@ -105,13 +105,37 @@ def build_menu_text() -> str:
         [
             "<b>🎬 Tele2Rub</b>",
             "📤 <b>Send a video</b> and I will upload it to Rubika Saved Messages.",
-            "",
-            f"📊 <b>Status:</b> {ltr_code('/status')}",
-            f"📋 <b>Transfers:</b> {ltr_code('/transfers')}",
-            f"🔁 <b>Retry:</b> {ltr_code('/retry task_id')}",
-            f"🧹 <b>Cleanup:</b> {ltr_code('/cleanup')}",
-            f"🛑 <b>Cancel:</b> {ltr_code('/cancel')}",
         ]
+    )
+
+
+def main_action_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("📊 Status", callback_data="menu:status"),
+                InlineKeyboardButton("📋 Transfers", callback_data="menu:transfers"),
+            ],
+            [
+                InlineKeyboardButton("🧹 Cleanup", callback_data="menu:cleanup"),
+                InlineKeyboardButton("🛑 Cancel", callback_data="menu:cancel"),
+            ],
+        ]
+    )
+
+
+def status_summary_keyboard(has_cleanup: bool) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton("📋 Details", callback_data="menu:transfers")]]
+    if has_cleanup:
+        rows.append([InlineKeyboardButton("🧹 Confirm Cleanup", callback_data="cleanup:confirm")])
+    return InlineKeyboardMarkup(rows)
+
+
+def cleanup_keyboard(has_candidates: bool) -> InlineKeyboardMarkup | None:
+    if not has_candidates:
+        return None
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("✅ Confirm cleanup", callback_data="cleanup:confirm")]]
     )
 
 
@@ -119,7 +143,7 @@ async def send_menu(message: Message) -> None:
     await message.reply_text(
         build_menu_text(),
         parse_mode=enums.ParseMode.HTML,
-        reply_markup=MENU_KEYBOARD,
+        reply_markup=main_action_keyboard(),
     )
 
 
@@ -216,6 +240,18 @@ def cancellable_tasks() -> list[tuple[str, dict]]:
     return tasks
 
 
+def retryable_failed_tasks() -> list[dict]:
+    tasks = []
+
+    for entry in reversed(read_failed_entries()):
+        task = entry.get("task") or {}
+        path = Path(task.get("path", ""))
+        if path.exists():
+            tasks.append(task)
+
+    return tasks
+
+
 def build_cancel_keyboard() -> InlineKeyboardMarkup | None:
     rows = []
 
@@ -234,6 +270,48 @@ def build_cancel_keyboard() -> InlineKeyboardMarkup | None:
 
     if not rows:
         return None
+
+    return InlineKeyboardMarkup(rows)
+
+
+def transfers_action_keyboard() -> InlineKeyboardMarkup:
+    rows = []
+
+    for _prefix, task in cancellable_tasks()[:8]:
+        task_id = task.get("task_id")
+        if not task_id:
+            continue
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    compact_button_label("🛑 Cancel", task),
+                    callback_data=f"cancel:{task_id}",
+                )
+            ]
+        )
+
+    for task in retryable_failed_tasks()[:8]:
+        task_id = task.get("task_id")
+        if not task_id:
+            continue
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    compact_button_label("🔁 Retry", task),
+                    callback_data=f"retry:{task_id}",
+                )
+            ]
+        )
+
+    rows.extend(
+        [
+            [
+                InlineKeyboardButton("📊 Status", callback_data="menu:status"),
+                InlineKeyboardButton("🧹 Cleanup", callback_data="menu:cleanup"),
+            ],
+            [InlineKeyboardButton("🛑 Cancel List", callback_data="menu:cancel")],
+        ]
+    )
 
     return InlineKeyboardMarkup(rows)
 
@@ -269,6 +347,57 @@ async def send_cancel_picker(message: Message) -> None:
     )
 
 
+async def send_status_summary(message: Message) -> None:
+    await message.reply_text(
+        build_status_summary(),
+        parse_mode=enums.ParseMode.HTML,
+        reply_markup=status_summary_keyboard(bool(cleanup_candidates())),
+    )
+
+
+async def send_transfers_summary(message: Message) -> None:
+    await message.reply_text(
+        build_transfers_summary(),
+        parse_mode=enums.ParseMode.HTML,
+        reply_markup=transfers_action_keyboard(),
+    )
+
+
+async def send_cleanup_preview(message: Message) -> None:
+    candidates = cleanup_candidates()
+    await message.reply_text(
+        build_cleanup_preview(),
+        parse_mode=enums.ParseMode.HTML,
+        reply_markup=cleanup_keyboard(bool(candidates)),
+    )
+
+
+async def run_cleanup(message: Message) -> None:
+    candidates = cleanup_candidates()
+    total_size = sum_file_sizes(candidates)
+    removed_count = 0
+
+    for path in candidates:
+        try:
+            path.unlink()
+            removed_count += 1
+        except OSError:
+            pass
+
+    await message.reply_text(
+        "\n".join(
+            [
+                "<b>🧹 Cleanup Complete</b>",
+                "",
+                f"Removed files: <b>{removed_count}</b>",
+                f"Freed space: <b>{human_size(total_size)}</b>",
+            ]
+        ),
+        parse_mode=enums.ParseMode.HTML,
+        reply_markup=main_action_keyboard(),
+    )
+
+
 def build_status_summary() -> str:
     queued = read_queue_tasks()
     processing = load_processing()
@@ -285,12 +414,7 @@ def build_status_summary() -> str:
         f"❌ <b>Failed:</b> {ltr_code(str(len(failed_entries)))}",
         f"📁 <b>Downloaded Files:</b> {ltr_code(f'{len(files)} / {human_size(sum_file_sizes(files))}')}",
         f"🧹 <b>Cleanup Available:</b> {ltr_code(f'{len(candidates)} / {human_size(sum_file_sizes(candidates))}')}",
-        "",
-        f"📋 <b>Details:</b> {ltr_code('/transfers')}",
     ]
-
-    if candidates:
-        lines.append(f"🧹 <b>Confirm Cleanup:</b> {ltr_code('/cleanup confirm')}")
 
     return "\n".join(lines)
 
@@ -328,18 +452,12 @@ def build_transfers_summary() -> str:
             lines.append(f"... and {len(queued) - 8} more")
         lines.append("")
 
-    retryable_failed = []
-    for entry in reversed(failed_entries):
-        task = entry.get("task") or {}
-        path = Path(task.get("path", ""))
-        if path.exists():
-            retryable_failed.append(task)
+    retryable_failed = retryable_failed_tasks()
 
     if retryable_failed:
         lines.append("<b>❌ Retryable Failed Transfers</b>")
         for task in retryable_failed[:5]:
-            task_id = task.get("task_id", "-")
-            lines.append(compact_task_card("•", task, f"🔁 <b>Retry:</b> {ltr_code(f'/retry {task_id}')}"))
+            lines.append(compact_task_card("•", task, "Tap a Retry button below."))
             lines.append("")
         if len(retryable_failed) > 5:
             lines.append(f"... and {len(retryable_failed) - 5} more")
@@ -348,8 +466,6 @@ def build_transfers_summary() -> str:
     if len(lines) == 2:
         lines.append("No active transfers right now.")
 
-    lines.append(f"🛑 <b>Cancel:</b> {ltr_code('/cancel task_id')}")
-    lines.append(f"🔁 <b>Retry:</b> {ltr_code('/retry task_id')}")
     return "\n".join(lines)
 
 
@@ -368,7 +484,6 @@ def build_cleanup_preview() -> str:
             [
                 "",
                 "These files are not active, queued, or processing.",
-                f"✅ <b>Confirm cleanup:</b> {ltr_code('/cleanup confirm')}",
             ]
         )
     else:
@@ -599,21 +714,13 @@ async def start_handler(client: Client, message: Message):
 @app.on_message(filters.private & filters.command("status"))
 async def status_handler(client: Client, message: Message):
     await ensure_bot_commands(client)
-    await message.reply_text(
-        build_status_summary(),
-        parse_mode=enums.ParseMode.HTML,
-        reply_markup=MENU_KEYBOARD,
-    )
+    await send_status_summary(message)
 
 
 @app.on_message(filters.private & filters.command("transfers"))
 async def transfers_handler(client: Client, message: Message):
     await ensure_bot_commands(client)
-    await message.reply_text(
-        build_transfers_summary(),
-        parse_mode=enums.ParseMode.HTML,
-        reply_markup=MENU_KEYBOARD,
-    )
+    await send_transfers_summary(message)
 
 
 @app.on_message(filters.private & filters.command("cleanup"))
@@ -623,36 +730,10 @@ async def cleanup_handler(client: Client, message: Message):
     confirm = len(command) > 1 and command[1].lower() == "confirm"
 
     if not confirm:
-        await message.reply_text(
-            build_cleanup_preview(),
-            parse_mode=enums.ParseMode.HTML,
-            reply_markup=MENU_KEYBOARD,
-        )
+        await send_cleanup_preview(message)
         return
 
-    candidates = cleanup_candidates()
-    total_size = sum_file_sizes(candidates)
-    removed_count = 0
-
-    for path in candidates:
-        try:
-            path.unlink()
-            removed_count += 1
-        except OSError:
-            pass
-
-    await message.reply_text(
-        "\n".join(
-            [
-                "<b>🧹 Cleanup Complete</b>",
-                "",
-                f"Removed files: <b>{removed_count}</b>",
-                f"Freed space: <b>{human_size(total_size)}</b>",
-            ]
-        ),
-        parse_mode=enums.ParseMode.HTML,
-        reply_markup=MENU_KEYBOARD,
-    )
+    await run_cleanup(message)
 
 
 async def retry_task_by_id(client: Client, message: Message, task_id: str) -> None:
@@ -723,9 +804,9 @@ async def retry_handler(client: Client, message: Message):
 
     if len(message.command) < 2:
         await message.reply_text(
-            "\n".join(["🔁 Retry with", ltr_code("/retry task_id")]),
+            "🔁 Open Transfers and use a Retry button on a failed transfer.",
             parse_mode=enums.ParseMode.HTML,
-            reply_markup=MENU_KEYBOARD,
+            reply_markup=main_action_keyboard(),
         )
         return
 
@@ -745,6 +826,33 @@ async def menu_button_handler(client: Client, message: Message):
         await cleanup_handler(client, message)
     elif text == BTN_CANCEL:
         await send_cancel_picker(message)
+
+
+@app.on_callback_query(filters.regex(r"^menu:"))
+async def menu_callback_handler(client: Client, callback_query: CallbackQuery):
+    action = (callback_query.data or "").split(":", 1)[1].strip()
+    await callback_query.answer()
+
+    if action == "status":
+        await send_status_summary(callback_query.message)
+    elif action == "transfers":
+        await send_transfers_summary(callback_query.message)
+    elif action == "cleanup":
+        await send_cleanup_preview(callback_query.message)
+    elif action == "cancel":
+        await send_cancel_picker(callback_query.message)
+
+
+@app.on_callback_query(filters.regex(r"^cleanup:confirm$"))
+async def cleanup_callback_handler(client: Client, callback_query: CallbackQuery):
+    await callback_query.answer("Cleanup started.")
+
+    try:
+        await callback_query.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    await run_cleanup(callback_query.message)
 
 
 @app.on_callback_query(filters.regex(r"^cancel:"))
