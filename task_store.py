@@ -86,33 +86,35 @@ def build_status_text(
     safe_file_name = escape(truncate_middle(file_name or "file"))
     safe_stage = escape(stage)
     safe_upload_status = escape(upload_status)
+    download_value = max(0, min(100, download_percent))
+    upload_value = max(0, min(100, upload_percent))
 
     lines = [
-        "<b>Tele2Rub</b>",
-        f"<b>کد:</b> <code>{safe_task_id}</code>",
-        f"<b>فایل:</b> <code>{safe_file_name}</code>",
-        f"<b>حجم:</b> {escape(human_size(file_size))}",
+        "<b>🎬 Tele2Rub</b>",
+        f"<b>{safe_stage}</b>",
+        f"{safe_upload_status}",
         "",
-        f"<b>وضعیت:</b> {safe_stage}",
-        f"<b>دانلود:</b> <code>{progress_meter(download_percent)}</code> {max(0, min(100, download_percent))}%",
-        f"<b>آپلود:</b> <code>{progress_meter(upload_percent)}</code> {max(0, min(100, upload_percent))}%",
-        f"<b>جزئیات:</b> {safe_upload_status}",
+        f"🎞 <b>ویدیو:</b> <code>{safe_file_name}</code>",
+        f"📦 <b>حجم:</b> {escape(human_size(file_size))}",
+        f"🆔 <b>کد:</b> <code>{safe_task_id}</code>",
+        "",
+        f"⬇️ <b>دریافت:</b> <code>{progress_meter(download_value)}</code> {download_value}%",
+        f"⬆️ <b>ارسال:</b> <code>{progress_meter(upload_value)}</code> {upload_value}%",
     ]
 
     if attempt_text:
-        lines.append(f"<b>تلاش:</b> {escape(attempt_text)}")
+        lines.append(f"🔁 <b>تلاش:</b> {escape(attempt_text)}")
 
     if queue_position is not None:
-        lines.append(f"<b>صف:</b> {queue_position}")
+        lines.append(f"⏳ <b>صف:</b> {queue_position}")
 
     if note:
-        lines.append(f"<b>توضیح:</b> {escape(note)}")
+        lines.append(escape(note))
 
     lines.extend(
         [
             "",
-            f"<b>لغو:</b> <code>/cancel {safe_task_id}</code>",
-            "یا روی همین پیام <code>/cancel</code> ریپلای کن.",
+            f"🛑 لغو: <code>/cancel {safe_task_id}</code>",
         ]
     )
     return "\n".join(lines)
@@ -207,6 +209,28 @@ def append_failed(task: dict, error: str) -> None:
     payload = {"task": task, "error": error}
     with open(FAILED_FILE, "a", encoding="utf-8") as file:
         file.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
+def read_failed_entries() -> list[dict]:
+    if not FAILED_FILE.exists():
+        return []
+
+    entries = []
+    with open(FAILED_FILE, "r", encoding="utf-8") as file:
+        for line in file:
+            line = line.strip()
+            if not line:
+                continue
+            entries.append(json.loads(line))
+    return entries
+
+
+def find_failed_entry(task_id: str) -> Optional[dict]:
+    for entry in reversed(read_failed_entries()):
+        task = entry.get("task") or {}
+        if task.get("task_id") == task_id:
+            return entry
+    return None
 
 
 def cancel_path(task_id: str) -> Path:

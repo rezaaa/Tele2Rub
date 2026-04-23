@@ -179,9 +179,8 @@ def make_upload_progress_callback(task: dict, attempt: int):
         save_processing(task)
         update_telegram_status(
             task,
-            stage="در حال آپلود به روبیکا",
-            upload_status="در حال ارسال فایل",
-            note="پیشرفت آپلود به صورت لحظه‌ای به‌روزرسانی می‌شود.",
+            stage="🚀 در حال ارسال",
+            upload_status="ویدیو در حال ارسال به روبیکا است.",
             attempt_text=task["attempt_text"],
         )
 
@@ -209,9 +208,8 @@ def send_with_retry(
         save_processing(task)
         update_telegram_status(
             task,
-            stage="در حال آپلود به روبیکا",
-            upload_status="در حال شروع آپلود",
-            note="اگر خطای موقت رخ بدهد، worker خودش دوباره تلاش می‌کند.",
+            stage="🚀 شروع ارسال",
+            upload_status="اتصال با روبیکا برقرار می‌شود.",
             attempt_text=task["attempt_text"],
         )
 
@@ -241,9 +239,8 @@ def send_with_retry(
                 save_processing(task)
                 update_telegram_status(
                     task,
-                    stage="خطای موقت در آپلود",
-                    upload_status="آپلود موقتا قطع شد",
-                    note=f"تلاش {attempt} ناموفق بود. {delay} ثانیه دیگر تلاش بعدی شروع می‌شود.",
+                    stage="⚠️ تلاش دوباره",
+                    upload_status=f"تلاش {attempt} ناموفق بود. تلاش بعدی تا {delay} ثانیه دیگر.",
                     attempt_text=next_attempt_text,
                 )
                 wait_with_cancel(task_id, delay)
@@ -274,9 +271,8 @@ def process_task(task: dict) -> None:
 
         update_telegram_status(
             task,
-            stage="نوبت شما رسید",
-            upload_status="آماده‌سازی فایل برای روبیکا",
-            note="آپلود تا چند لحظه دیگر شروع می‌شود.",
+            stage="📤 نوبت ارسال",
+            upload_status="ویدیو برای ارسال آماده می‌شود.",
         )
 
         task["file_name"] = send_name
@@ -288,9 +284,8 @@ def process_task(task: dict) -> None:
         clear_cancelled(task_id)
         update_telegram_status(
             task,
-            stage="لغو شد",
-            upload_status="ارسال متوقف شد",
-            note="فایل موقت پاک شد.",
+            stage="🛑 لغو شد",
+            upload_status="انتقال متوقف شد.",
             attempt_text=task.get("attempt_text"),
         )
         return
@@ -304,9 +299,8 @@ def process_task(task: dict) -> None:
     save_processing(task)
     update_telegram_status(
         task,
-        stage="ارسال شد",
-        upload_status="موفق",
-        note="فایل موقت پاک شد و کار کامل شد.",
+        stage="✅ ارسال شد",
+        upload_status="ویدیو با موفقیت ارسال شد.",
         attempt_text=task.get("attempt_text"),
     )
 
@@ -331,9 +325,8 @@ def worker_loop():
             clear_cancelled(processing_task.get("task_id", ""))
             update_telegram_status(
                 processing_task,
-                stage="لغو شد",
-                upload_status="ارسال متوقف شد",
-                note="فایل موقت پاک شد.",
+                stage="🛑 لغو شد",
+                upload_status="انتقال متوقف شد.",
                 attempt_text=processing_task.get("attempt_text"),
             )
         except Exception as e:
@@ -344,9 +337,8 @@ def worker_loop():
             append_failed(processing_task, str(e))
             update_telegram_status(
                 processing_task,
-                stage="خطا در آپلود",
-                upload_status=f"پس از {MAX_RETRIES} تلاش ناموفق شد",
-                note="فایل موقت برای بررسی و تلاش دوباره نگه داشته شد.",
+                stage="❌ ارسال ناموفق",
+                upload_status=f"پس از {MAX_RETRIES} تلاش ارسال نشد.",
                 attempt_text=processing_task.get("attempt_text"),
             )
         finally:

@@ -53,6 +53,22 @@ Current status coverage includes:
 - Completed successfully
 - Failed after retries
 
+## Bot Menu
+
+The Telegram bot exposes a slash-command menu and a persistent button menu.
+
+Available commands:
+
+- `/start`: open the main menu
+- `/menu`: show the button menu again
+- `/status`: show active downloads, active upload, queue size, and downloads folder size
+- `/transfers`: list active and queued transfers with task IDs
+- `/retry <task_id>`: requeue a failed transfer if the downloaded file still exists
+- `/cleanup`: preview safe cleanup candidates in `downloads/`
+- `/cleanup confirm`: delete files in `downloads/` that are not active, queued, or processing
+- `/cancel <task_id>`: cancel a specific transfer
+- `/help`: show the menu help text
+
 ## Retry Policy
 
 Rubika uploads automatically retry on temporary errors.
