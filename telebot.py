@@ -101,6 +101,7 @@ BOT_COMMANDS = [
     BotCommand("status", "Show queue and storage status"),
     BotCommand("transfers", "List active and queued transfers"),
     BotCommand("retry", "Retry a failed transfer"),
+    BotCommand("retry_all", "Retry all failed transfers"),
     BotCommand("cleanup", "Clean safe download leftovers"),
     BotCommand("cancel", "Cancel a transfer"),
 ]
@@ -305,12 +306,17 @@ def cancellable_tasks() -> list[tuple[str, dict]]:
 
 def retryable_failed_tasks() -> list[dict]:
     tasks = []
+    seen_task_ids: set[str] = set()
 
     for entry in reversed(read_failed_entries()):
         task = entry.get("task") or {}
+        task_id = task.get("task_id")
+        if not task_id or task_id in seen_task_ids:
+            continue
         path = Path(task.get("path", ""))
         if path.exists():
             tasks.append(task)
+            seen_task_ids.add(task_id)
 
     return tasks
 
@@ -339,6 +345,7 @@ def build_cancel_keyboard() -> InlineKeyboardMarkup | None:
 
 def transfers_action_keyboard() -> InlineKeyboardMarkup:
     rows = []
+    retryable_failed = retryable_failed_tasks()
 
     for _prefix, task in cancellable_tasks()[:8]:
         task_id = task.get("task_id")
@@ -353,7 +360,17 @@ def transfers_action_keyboard() -> InlineKeyboardMarkup:
             ]
         )
 
-    for task in retryable_failed_tasks()[:8]:
+    if retryable_failed:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "🔁 Retry All Failed",
+                    callback_data="retry_all",
+                )
+            ]
+        )
+
+    for task in retryable_failed[:8]:
         task_id = task.get("task_id")
         if not task_id:
             continue
@@ -1234,6 +1251,92 @@ async def retry_task_by_id(client: Client, message: Message, task_id: str) -> No
     )
 
 
+async def retry_all_failed_tasks(client: Client, message: Message) -> None:
+    retryable_tasks = retryable_failed_tasks()
+    if not retryable_tasks:
+        await message.reply_text(
+            "🔎 No retryable failed transfers were found.",
+            reply_markup=MENU_KEYBOARD,
+        )
+        return
+
+    queued_count = 0
+    skipped_count = 0
+
+    for task in retryable_tasks:
+        task_id = task.get("task_id", "")
+        if not task_id:
+            skipped_count += 1
+            continue
+
+        if task_id in ACTIVE_DOWNLOADS:
+            skipped_count += 1
+            continue
+
+        if find_queued_task(lambda queued: queued.get("task_id") == task_id):
+            skipped_count += 1
+            continue
+
+        processing_task = load_processing()
+        if processing_task and processing_task.get("task_id") == task_id:
+            skipped_count += 1
+            continue
+
+        path = Path(task.get("path", ""))
+        if not path.exists():
+            skipped_count += 1
+            continue
+
+        retry_task = dict(task)
+        retry_task["upload_percent"] = 0
+        retry_task["attempt_text"] = None
+        retry_task["speed_text"] = None
+        retry_task["eta_text"] = None
+        retry_task["started_at"] = time.time()
+        retry_task["file_size"] = int(retry_task.get("file_size") or path.stat().st_size)
+        append_task(retry_task)
+        queued_count += 1
+
+        queue_position = queue_size() + (1 if load_processing() else 0)
+        text = build_status_text(
+            task_id=task_id,
+            file_name=retry_task.get("file_name", path.name),
+            file_size=int(retry_task.get("file_size", 0)),
+            stage="🔁 Queued Again",
+            download_percent=100,
+            upload_percent=0,
+            upload_status="The transfer was added back to the upload queue.",
+            queue_position=queue_position,
+        )
+        await edit_status_by_task(
+            client,
+            retry_task,
+            text,
+            reply_markup=status_action_keyboard(task_id, "cancel"),
+        )
+
+    if queued_count == 0:
+        await message.reply_text(
+            "⚠️ No failed transfers were added back to the queue.",
+            reply_markup=MENU_KEYBOARD,
+        )
+        return
+
+    lines = [
+        "<b>🔁 Retry All Complete</b>",
+        "",
+        f"Added back to queue: <b>{queued_count}</b>",
+    ]
+    if skipped_count:
+        lines.append(f"Skipped: <b>{skipped_count}</b>")
+
+    await message.reply_text(
+        "\n".join(lines),
+        parse_mode=enums.ParseMode.HTML,
+        reply_markup=MENU_KEYBOARD,
+    )
+
+
 @app.on_message(filters.private & filters.command("retry"))
 async def retry_handler(client: Client, message: Message):
     if not await ensure_authorized_message(message):
@@ -1242,14 +1345,25 @@ async def retry_handler(client: Client, message: Message):
 
     if len(message.command) < 2:
         await message.reply_text(
-            "🔁 Open Transfers and use a Retry button on a failed transfer.",
+            "🔁 Open Transfers and use a Retry button, or run /retry all.",
             parse_mode=enums.ParseMode.HTML,
             reply_markup=main_action_keyboard(),
         )
         return
 
     task_id = message.command[1].strip()
+    if task_id.lower() == "all":
+        await retry_all_failed_tasks(client, message)
+        return
     await retry_task_by_id(client, message, task_id)
+
+
+@app.on_message(filters.private & filters.command("retry_all"))
+async def retry_all_handler(client: Client, message: Message):
+    if not await ensure_authorized_message(message):
+        return
+    await ensure_bot_commands(client)
+    await retry_all_failed_tasks(client, message)
 
 
 @app.on_message(filters.private & MENU_BUTTON_FILTER)
@@ -1327,6 +1441,20 @@ async def retry_callback_handler(client: Client, callback_query: CallbackQuery):
         pass
 
     await retry_task_by_id(client, callback_query.message, task_id)
+
+
+@app.on_callback_query(filters.regex(r"^retry_all$"))
+async def retry_all_callback_handler(client: Client, callback_query: CallbackQuery):
+    if not await ensure_authorized_callback(callback_query):
+        return
+    await callback_query.answer("Retrying all failed transfers.")
+
+    try:
+        await callback_query.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    await retry_all_failed_tasks(client, callback_query.message)
 
 
 @app.on_message(filters.private & filters.command("cancel"))
