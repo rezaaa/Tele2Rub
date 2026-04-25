@@ -52,7 +52,8 @@ Available commands:
 
 - `/start` - open the main menu
 - `/settings` - show the current Rubika session and upload destination
-- `/set_rubika <session_name>` - switch to another Rubika number/session
+- `/set_rubika` - start Rubika number setup in Telegram
+- `/set_rubika <phone_number>` - start Rubika number setup directly with a phone number
 - `/use_saved` - send new uploads to Saved Messages
 - `/use_channel <channel_target>` - send new uploads to a Rubika channel
 - `/status` - show active downloads, active upload, queue, failed count, and local storage usage
@@ -164,6 +165,15 @@ Variables:
 
 Runtime upload settings are stored in `queue/settings.json` after you change them from Telegram.
 That lets you switch the active Rubika number/session and destination without editing `.env` or restarting the bot.
+
+Changing the Rubika number now happens inside Telegram:
+
+1. Tap `⚙️ Settings` then `📱 Change Rubika Number`, or run `/set_rubika`
+2. Send the phone number
+3. Wait for the OTP prompt
+4. Send the OTP code
+
+The bot replaces the existing stored Rubika session after a successful login.
 
 How to get your Telegram user ID:
 
