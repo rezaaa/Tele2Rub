@@ -32,21 +32,6 @@ def session_candidates(session_name: str) -> list[Path]:
     ]
 
 
-def build_temp_session_name(session_name: str) -> str:
-    base_path = session_base_path(session_name)
-    temp_name = f".walrus_auth_{base_path.name}_{os.getpid()}"
-    return str(base_path.with_name(temp_name))
-
-
-def cleanup_session_files(session_name: str) -> None:
-    for path in session_candidates(session_name):
-        try:
-            if path.exists():
-                path.unlink()
-        except OSError:
-            pass
-
-
 def backup_existing_session(session_name: str) -> None:
     global BACKUP_DIR
 
@@ -149,12 +134,11 @@ async def run_auth(session_name: str, phone_number: str) -> None:
         print(f"__AUTH_ERROR__:Unable to import rubpy: {error}", flush=True)
         raise SystemExit(1)
 
-    temp_session_name = build_temp_session_name(session_name)
-    cleanup_session_files(temp_session_name)
     REQUIRES_USER_VERIFICATION = False
     builtins.input = build_input_handler(phone_number)
+    backup_existing_session(session_name)
 
-    client = Client(name=temp_session_name)
+    client = Client(name=session_name)
     try:
         await client.start(phone_number=phone_number)
         await client.stop()
@@ -162,27 +146,11 @@ async def run_auth(session_name: str, phone_number: str) -> None:
             raise RuntimeError(
                 "Rubika login finished without asking for verification. The previous session may still be active."
             )
-        backup_existing_session(session_name)
-        cleanup_session_files(session_name)
-        moved_any = False
-        for source_path, target_path in zip(
-            session_candidates(temp_session_name),
-            session_candidates(session_name),
-        ):
-            if not source_path.exists():
-                continue
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(source_path), str(target_path))
-            moved_any = True
-        if not moved_any:
-            raise RuntimeError("Authenticated session files were not created.")
     except Exception as error:
-        cleanup_session_files(temp_session_name)
         restore_existing_session()
         print(f"__AUTH_ERROR__:{error}", flush=True)
         raise SystemExit(1)
 
-    cleanup_session_files(temp_session_name)
     finalize_backup()
     print("__AUTH_SUCCESS__", flush=True)
 
