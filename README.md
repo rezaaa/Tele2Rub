@@ -15,6 +15,7 @@ This project started after a few storage/upload experiments:
 - I first tried Arvan OSS as the target, but it was too slow.
 - Then I tried Google Drive, but it got filtered.
 - After that, I found [caffeinexz/Tele2Rub](https://github.com/caffeinexz/Tele2Rub) and used it as the inspiration for trying Rubika instead.
+- The name **Walrus** is inspired by the Black Sails series: Captain Flint's ship, Walrus.
 
 Walrus uses a simple queue-based flow:
 
