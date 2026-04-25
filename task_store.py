@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import json
 import os
 import re
@@ -8,14 +7,11 @@ import unicodedata
 from html import escape
 from pathlib import Path
 from typing import Callable, Optional
-from urllib.parse import urlparse, urlunparse
 
 
 BASE_DIR = Path(__file__).resolve().parent
 DOWNLOAD_DIR = BASE_DIR / "downloads"
 QUEUE_DIR = BASE_DIR / "queue"
-LOG_DIR = BASE_DIR / "logs"
-LOG_FILE = LOG_DIR / "walrus.log"
 QUEUE_FILE = QUEUE_DIR / "tasks.jsonl"
 PROCESSING_FILE = QUEUE_DIR / "processing.json"
 FAILED_FILE = QUEUE_DIR / "failed.jsonl"
@@ -29,66 +25,6 @@ def ensure_storage_dirs() -> None:
     DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
     QUEUE_DIR.mkdir(parents=True, exist_ok=True)
     CANCEL_DIR.mkdir(parents=True, exist_ok=True)
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def redact_url(text: str) -> str:
-    parsed = urlparse(text)
-    if parsed.scheme not in {"http", "https", "file"}:
-        return text
-
-    netloc = parsed.netloc
-    if "@" in netloc:
-        _, host = netloc.rsplit("@", 1)
-        netloc = f"***@{host}"
-
-    return urlunparse(parsed._replace(netloc=netloc, query="", fragment=""))
-
-
-def safe_log_value(value):
-    if isinstance(value, dict):
-        safe = {}
-        for key, item in value.items():
-            key_text = str(key).lower()
-            if any(secret in key_text for secret in ("auth", "token", "hash", "secret", "password")):
-                safe[key] = "***"
-            elif "url" in key_text:
-                safe[key] = redact_url(str(item))
-            else:
-                safe[key] = safe_log_value(item)
-        return safe
-
-    if isinstance(value, (list, tuple)):
-        return [safe_log_value(item) for item in value]
-
-    if isinstance(value, Path):
-        return str(value)
-
-    if isinstance(value, str):
-        safe = redact_url(value)
-        return safe if len(safe) <= 1200 else safe[:1197] + "..."
-
-    if isinstance(value, (int, float, bool)) or value is None:
-        return value
-
-    return repr(value)
-
-
-def append_log_event(component: str, event: str, level: str = "INFO", **fields) -> None:
-    try:
-        ensure_storage_dirs()
-        payload = {
-            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "level": level.upper(),
-            "component": component,
-            "event": event,
-        }
-        payload.update(safe_log_value(fields))
-
-        with open(LOG_FILE, "a", encoding="utf-8") as file:
-            file.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
-    except Exception:
-        pass
 
 
 def safe_filename(name: Optional[str], default: str = "file.bin") -> str:

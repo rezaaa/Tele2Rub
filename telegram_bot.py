@@ -7,7 +7,6 @@ import signal
 import subprocess
 import sys
 import time
-import traceback
 import uuid
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -27,7 +26,6 @@ import requests
 
 from task_store import (
     DOWNLOAD_DIR,
-    append_log_event,
     apply_runtime_settings,
     append_task,
     build_status_text,
@@ -64,15 +62,6 @@ OWNER_TELEGRAM_ID = int(os.getenv("OWNER_TELEGRAM_ID", "0"))
 
 ensure_storage_dirs()
 
-
-def log_bot_event(task_id: str | None, event: str, level: str = "INFO", **fields) -> None:
-    append_log_event(
-        "telegram_bot",
-        event,
-        level=level,
-        task_id=task_id,
-        **fields,
-    )
 
 if not API_ID or not API_HASH or not BOT_TOKEN:
     raise RuntimeError("Please set API_ID, API_HASH and BOT_TOKEN in .env")
@@ -1486,14 +1475,6 @@ def download_file_url(
 ) -> Path:
     parsed = urlparse(url)
     scheme = parsed.scheme.lower()
-    log_bot_event(
-        task_id,
-        "direct_download_start",
-        url=url,
-        scheme=scheme,
-        download_path=str(download_path),
-        existing_size=download_path.stat().st_size if download_path.exists() else 0,
-    )
 
     if scheme == "file":
         source_path = Path(unquote(parsed.path or ""))
@@ -1508,7 +1489,6 @@ def download_file_url(
         with source_path.open("rb") as source, download_path.open("wb") as target:
             while True:
                 if should_cancel():
-                    log_bot_event(task_id, "direct_download_cancelled", level="WARNING")
                     raise DirectDownloadCancelled("Cancelled by user.")
                 chunk = source.read(1024 * 256)
                 if not chunk:
@@ -1517,14 +1497,6 @@ def download_file_url(
                 copied += len(chunk)
                 progress(copied, total)
         progress(total, total)
-        log_bot_event(
-            task_id,
-            "direct_download_complete",
-            source="file",
-            total_bytes=total,
-            downloaded_bytes=copied,
-            path_size=download_path.stat().st_size if download_path.exists() else None,
-        )
         return download_path
 
     if scheme not in {"http", "https"}:
@@ -1539,39 +1511,14 @@ def download_file_url(
         existing_size = download_path.stat().st_size if download_path.exists() else 0
         if existing_size > 0:
             download_path.unlink(missing_ok=True)
-            log_bot_event(
-                task_id,
-                "direct_download_partial_removed",
-                level="WARNING",
-                attempt=attempt,
-                removed_bytes=existing_size,
-            )
 
         try:
-            log_bot_event(
-                task_id,
-                "direct_download_attempt_start",
-                attempt=attempt,
-                max_retries=DIRECT_DOWNLOAD_MAX_RETRIES,
-                url=url,
-            )
             with requests.get(
                 url,
                 stream=True,
                 timeout=(15, 120),
             ) as response:
                 response.raise_for_status()
-                log_bot_event(
-                    task_id,
-                    "direct_download_response",
-                    attempt=attempt,
-                    status_code=response.status_code,
-                    final_url=response.url,
-                    content_type=response.headers.get("content-type"),
-                    content_length=response.headers.get("content-length"),
-                    content_range=response.headers.get("content-range"),
-                    accept_ranges=response.headers.get("accept-ranges"),
-                )
 
                 content_type = response.headers.get("content-type", "")
                 if not (
@@ -1589,7 +1536,6 @@ def download_file_url(
                 with download_path.open("wb") as target:
                     for chunk in response.iter_content(chunk_size=1024 * 256):
                         if should_cancel():
-                            log_bot_event(task_id, "direct_download_cancelled", level="WARNING")
                             raise DirectDownloadCancelled("Cancelled by user.")
                         if not chunk:
                             continue
@@ -1603,37 +1549,12 @@ def download_file_url(
                     )
 
                 progress(total or downloaded, total or downloaded)
-                log_bot_event(
-                    task_id,
-                    "direct_download_complete",
-                    source="http",
-                    attempt=attempt,
-                    total_bytes=total or downloaded,
-                    downloaded_bytes=downloaded,
-                    path_size=download_path.stat().st_size if download_path.exists() else None,
-                )
                 return download_path
         except Exception as error:
             if isinstance(error, DirectDownloadCancelled):
                 raise
 
             last_error = error
-            retry_allowed = (
-                attempt < DIRECT_DOWNLOAD_MAX_RETRIES
-                and is_transient_download_error(str(error).lower())
-            )
-            log_bot_event(
-                task_id,
-                "direct_download_error",
-                level="WARNING" if retry_allowed else "ERROR",
-                attempt=attempt,
-                max_retries=DIRECT_DOWNLOAD_MAX_RETRIES,
-                error=str(error),
-                error_type=type(error).__name__,
-                retry_allowed=retry_allowed,
-                local_size=download_path.stat().st_size if download_path.exists() else 0,
-                traceback=traceback.format_exc(limit=6),
-            )
             if attempt >= DIRECT_DOWNLOAD_MAX_RETRIES:
                 break
 
@@ -1682,22 +1603,6 @@ async def queue_downloaded_file(
             downloaded_path.name,
         )
     apply_runtime_settings(task)
-    log_bot_event(
-        task_id,
-        "queue_downloaded_file",
-        source=source,
-        source_url=source_url,
-        path=str(downloaded_path),
-        path_exists=downloaded_path.exists(),
-        path_size=downloaded_path.stat().st_size if downloaded_path.exists() else None,
-        file_name=file_name,
-        upload_file_name=task.get("upload_file_name"),
-        file_size=file_size,
-        media_type=media_type,
-        queue_position=queue_position,
-        rubika_session=task.get("rubika_session"),
-        rubika_target=task.get("rubika_target"),
-    )
 
     append_task(task)
 
@@ -2219,14 +2124,6 @@ async def process_direct_video_url(message: Message, url: str) -> dict:
     download_path = DOWNLOAD_DIR / file_name
     started_at = time.time()
     task_meta = {"file_name": file_name, "file_size": 0}
-    log_bot_event(
-        task_id,
-        "direct_url_task_created",
-        url=url,
-        file_name=file_name,
-        download_path=str(download_path),
-        upload_file_name=file_name,
-    )
 
     status = await message.reply_text(
         build_status_text(
@@ -2272,13 +2169,6 @@ async def process_direct_video_url(message: Message, url: str) -> dict:
             raise RuntimeError("Downloaded file not found.")
 
         file_size = task_meta["file_size"] or downloaded_path.stat().st_size
-        log_bot_event(
-            task_id,
-            "direct_url_download_ready",
-            path=str(downloaded_path),
-            path_size=downloaded_path.stat().st_size,
-            file_size=file_size,
-        )
         await queue_downloaded_file(
             task_id=task_id,
             message=message,
@@ -2293,24 +2183,11 @@ async def process_direct_video_url(message: Message, url: str) -> dict:
             source_url=url,
             upload_file_name=file_name,
         )
-        log_bot_event(task_id, "direct_url_queued", file_name=file_name)
         return {"task_id": task_id, "file_name": file_name, "status": "queued"}
     except Exception as e:
         active = ACTIVE_DOWNLOADS.get(task_id, {})
         was_cancelled = active.get("cancelled") or isinstance(e, DirectDownloadCancelled)
         cleanup_download_artifact(str(download_path))
-        log_bot_event(
-            task_id,
-            "direct_url_failed" if not was_cancelled else "direct_url_cancelled",
-            level="WARNING" if was_cancelled else "ERROR",
-            url=url,
-            file_name=file_name,
-            file_size=task_meta.get("file_size", 0),
-            download_percent=active.get("download_percent", 0),
-            error=str(e),
-            error_type=type(e).__name__,
-            traceback=traceback.format_exc(limit=6),
-        )
 
         if was_cancelled:
             await safe_edit_status(
