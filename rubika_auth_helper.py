@@ -13,14 +13,38 @@ from pathlib import Path
 BACKUP_PATHS: list[tuple[Path, Path]] = []
 BACKUP_DIR: Path | None = None
 RESTORED = False
+REQUIRES_USER_VERIFICATION = False
+
+
+def session_base_path(session_name: str) -> Path:
+    path = Path(session_name)
+    if path.parent == Path(""):
+        return Path.cwd() / path.name
+    return path
 
 
 def session_candidates(session_name: str) -> list[Path]:
+    base_path = session_base_path(session_name)
     return [
-        Path(session_name),
-        Path(f"{session_name}.session"),
-        Path(f"{session_name}.sqlite"),
+        base_path,
+        base_path.with_name(f"{base_path.name}.session"),
+        base_path.with_name(f"{base_path.name}.sqlite"),
     ]
+
+
+def build_temp_session_name(session_name: str) -> str:
+    base_path = session_base_path(session_name)
+    temp_name = f".walrus_auth_{base_path.name}_{os.getpid()}"
+    return str(base_path.with_name(temp_name))
+
+
+def cleanup_session_files(session_name: str) -> None:
+    for path in session_candidates(session_name):
+        try:
+            if path.exists():
+                path.unlink()
+        except OSError:
+            pass
 
 
 def backup_existing_session(session_name: str) -> None:
@@ -90,6 +114,7 @@ def install_signal_handlers() -> None:
 
 def build_input_handler(phone_number: str):
     def prompt_input(prompt: str = "") -> str:
+        global REQUIRES_USER_VERIFICATION
         prompt_text = (prompt or "").strip()
         prompt_lower = prompt_text.lower()
 
@@ -98,11 +123,13 @@ def build_input_handler(phone_number: str):
             return "y"
 
         if "code" in prompt_lower or "otp" in prompt_lower or "verify" in prompt_lower:
+            REQUIRES_USER_VERIFICATION = True
             print("__AUTH_OTP_PROMPT__", flush=True)
         elif "phone" in prompt_lower or "number" in prompt_lower:
             print("__AUTH_PHONE_AUTO__", flush=True)
             return phone_number
         elif prompt_text:
+            REQUIRES_USER_VERIFICATION = True
             print(f"__AUTH_PROMPT__:{prompt_text}", flush=True)
 
         value = sys.stdin.readline()
@@ -115,24 +142,47 @@ def build_input_handler(phone_number: str):
 
 
 async def run_auth(session_name: str, phone_number: str) -> None:
+    global REQUIRES_USER_VERIFICATION
     try:
         from rubpy import Client
     except Exception as error:
         print(f"__AUTH_ERROR__:Unable to import rubpy: {error}", flush=True)
         raise SystemExit(1)
 
+    temp_session_name = build_temp_session_name(session_name)
+    cleanup_session_files(temp_session_name)
+    REQUIRES_USER_VERIFICATION = False
     builtins.input = build_input_handler(phone_number)
-    backup_existing_session(session_name)
 
-    client = Client(name=session_name)
+    client = Client(name=temp_session_name)
     try:
         await client.start(phone_number=phone_number)
         await client.stop()
+        if not REQUIRES_USER_VERIFICATION:
+            raise RuntimeError(
+                "Rubika login finished without asking for verification. The previous session may still be active."
+            )
+        backup_existing_session(session_name)
+        cleanup_session_files(session_name)
+        moved_any = False
+        for source_path, target_path in zip(
+            session_candidates(temp_session_name),
+            session_candidates(session_name),
+        ):
+            if not source_path.exists():
+                continue
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(source_path), str(target_path))
+            moved_any = True
+        if not moved_any:
+            raise RuntimeError("Authenticated session files were not created.")
     except Exception as error:
+        cleanup_session_files(temp_session_name)
         restore_existing_session()
         print(f"__AUTH_ERROR__:{error}", flush=True)
         raise SystemExit(1)
 
+    cleanup_session_files(temp_session_name)
     finalize_backup()
     print("__AUTH_SUCCESS__", flush=True)
 
