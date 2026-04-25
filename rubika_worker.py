@@ -5,6 +5,7 @@ import atexit
 from html import escape
 import os
 import time
+import traceback
 from pathlib import Path
 
 import requests
@@ -13,6 +14,7 @@ from rubpy import Client as RubikaClient
 
 from task_store import (
     append_failed,
+    append_log_event,
     build_status_text,
     clear_cancelled,
     clear_processing,
@@ -52,6 +54,23 @@ MEDIA_EXTENSIONS = {
     ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp",
     ".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac",
 }
+
+
+def log_worker_event(task: dict | None, event: str, level: str = "INFO", **fields) -> None:
+    task = task or {}
+    append_log_event(
+        "rubika_worker",
+        event,
+        level=level,
+        task_id=task.get("task_id"),
+        source=task.get("source"),
+        file_name=task.get("file_name"),
+        upload_file_name=task.get("upload_file_name"),
+        file_size=task.get("file_size"),
+        upload_percent=task.get("upload_percent"),
+        attempt_text=task.get("attempt_text"),
+        **fields,
+    )
 
 
 class CancelledTaskError(RuntimeError):
@@ -252,25 +271,53 @@ async def send_document(
     caption: str = "",
     callback=None,
     file_name: str | None = None,
+    task: dict | None = None,
 ):
     client = RubikaClient(name=session_name)
     entered = False
+    task = task or {}
+    upload_name = file_name or Path(file_path).name
+    log_worker_event(
+        task,
+        "rubika_connect_start",
+        session_name=session_name,
+        target=target,
+        file_path=file_path,
+        upload_name=upload_name,
+        caption_length=len(caption or ""),
+    )
     try:
         await asyncio.wait_for(client.__aenter__(), timeout=RUBIKA_CONNECT_TIMEOUT)
         entered = True
+        log_worker_event(task, "rubika_connect_ok")
     except asyncio.TimeoutError as exc:
+        log_worker_event(
+            task,
+            "rubika_connect_timeout",
+            level="ERROR",
+            timeout_seconds=RUBIKA_CONNECT_TIMEOUT,
+        )
         raise RubikaConnectTimeoutError(
             f"Rubika connection timed out after {RUBIKA_CONNECT_TIMEOUT}s."
         ) from exc
 
     try:
+        log_worker_event(task, "rubika_upload_start", upload_name=upload_name)
         uploaded = await client.upload(
             file_path,
             callback=callback,
-            file_name=file_name or Path(file_path).name,
+            file_name=upload_name,
         )
 
         file_inline = dict(uploaded) if isinstance(uploaded, dict) else uploaded.to_dict
+        log_worker_event(
+            task,
+            "rubika_upload_ok",
+            upload_result={
+                key: file_inline.get(key)
+                for key in ("mime", "size", "dc_id", "file_id", "file_name")
+            },
+        )
         file_inline.update(
             {
                 "type": "File",
@@ -284,17 +331,46 @@ async def send_document(
 
         last_error = None
         for attempt in range(1, RUBIKA_FINALIZE_RETRIES + 1):
+            log_worker_event(
+                task,
+                "rubika_finalize_start",
+                finalize_attempt=attempt,
+                finalize_retries=RUBIKA_FINALIZE_RETRIES,
+                file_inline={
+                    key: file_inline.get(key)
+                    for key in ("mime", "size", "dc_id", "file_id", "file_name", "type")
+                },
+            )
             try:
-                return await client.send_message(
+                result = await client.send_message(
                     object_guid=target,
                     text=caption or "",
                     file_inline=file_inline,
                 )
+                log_worker_event(
+                    task,
+                    "rubika_finalize_ok",
+                    finalize_attempt=attempt,
+                    result_type=type(result).__name__,
+                )
+                return result
             except Exception as error:
                 last_error = error
+                error_text = compact_error_text(error)
+                transient = is_transient_upload_error(error_text.lower())
+                log_worker_event(
+                    task,
+                    "rubika_finalize_error",
+                    level="WARNING" if transient and attempt < RUBIKA_FINALIZE_RETRIES else "ERROR",
+                    finalize_attempt=attempt,
+                    error=error_text,
+                    error_type=type(error).__name__,
+                    transient=transient,
+                    traceback=traceback.format_exc(limit=6),
+                )
                 if attempt >= RUBIKA_FINALIZE_RETRIES:
                     break
-                if not is_transient_upload_error(compact_error_text(error).lower()):
+                if not transient:
                     break
                 await asyncio.sleep(RUBIKA_FINALIZE_RETRY_DELAY * attempt)
 
@@ -302,6 +378,7 @@ async def send_document(
     finally:
         if entered:
             await client.__aexit__(None, None, None)
+            log_worker_event(task, "rubika_disconnect_ok")
 
 
 def is_transient_upload_error(error_text: str) -> bool:
@@ -389,6 +466,7 @@ def make_upload_progress_callback(task: dict, attempt: int):
         "last_bytes": 0,
         "last_sample_at": time.monotonic(),
         "speed_bps": 0.0,
+        "logged_upload_complete": False,
     }
     task_id = task.get("task_id", "")
 
@@ -401,6 +479,15 @@ def make_upload_progress_callback(task: dict, attempt: int):
 
         raw_percent = min(100, max(0, int((current * 100) / total)))
         percent = min(raw_percent, 99)
+        if raw_percent == 100 and not state["logged_upload_complete"]:
+            state["logged_upload_complete"] = True
+            log_worker_event(
+                task,
+                "rubika_upload_chunks_complete",
+                attempt=attempt,
+                total_bytes=total,
+                current_bytes=current,
+            )
         if state["last_percent"] >= 0 and percent < state["last_percent"]:
             return
 
@@ -483,6 +570,14 @@ def send_with_retry(
         )
 
         try:
+            log_worker_event(
+                task,
+                "upload_attempt_start",
+                attempt=attempt,
+                max_retries=MAX_RETRIES,
+                upload_name=upload_name,
+                file_path=file_path,
+            )
             result = asyncio.run(
                 send_document(
                     session_name,
@@ -491,15 +586,18 @@ def send_with_retry(
                     caption,
                     callback=make_upload_progress_callback(task, attempt),
                     file_name=upload_name,
+                    task=task,
                 )
             )
 
             if is_cancelled(task_id):
                 raise CancelledTaskError("Cancelled by user.")
 
+            log_worker_event(task, "upload_attempt_ok", attempt=attempt)
             return result
         except Exception as e:
             if isinstance(e, CancelledTaskError):
+                log_worker_event(task, "upload_attempt_cancelled", level="WARNING", attempt=attempt)
                 raise
 
             last_error = e
@@ -513,13 +611,32 @@ def send_with_retry(
             transient = is_transient_upload_error(error_text)
             near_complete = int(task.get("upload_percent", 0) or 0) >= 95
             fallback_name_retry = not used_fallback_name
+            retry_allowed = attempt < MAX_RETRIES and (
+                transient or near_complete or fallback_name_retry
+            )
 
             if fallback_name_retry:
                 upload_name = build_fallback_upload_name(task, file_path, upload_name)
                 used_fallback_name = True
                 task["upload_file_name"] = upload_name
 
-            if attempt < MAX_RETRIES and (transient or near_complete or fallback_name_retry):
+            log_worker_event(
+                task,
+                "upload_attempt_error",
+                level="WARNING" if retry_allowed else "ERROR",
+                attempt=attempt,
+                max_retries=MAX_RETRIES,
+                error=compact_error_text(e),
+                error_type=type(e).__name__,
+                transient=transient,
+                near_complete=near_complete,
+                fallback_name_retry=fallback_name_retry,
+                retry_allowed=retry_allowed,
+                next_upload_name=upload_name,
+                traceback=traceback.format_exc(limit=6),
+            )
+
+            if retry_allowed:
                 delay = RETRY_DELAY * attempt
                 next_attempt_text = f"{attempt + 1} of {MAX_RETRIES}"
                 task["upload_percent"] = 0
@@ -567,9 +684,20 @@ def process_task(task: dict) -> None:
     task["rubika_target"] = settings["rubika_target"]
     send_path = original_path
     send_name = normalize_upload_filename(task.get("file_name") or original_path.name, original_path.name)
+    log_worker_event(
+        task,
+        "task_start",
+        path=str(send_path),
+        path_exists=send_path.exists(),
+        path_size=send_path.stat().st_size if send_path.exists() else None,
+        display_name=send_name,
+        rubika_session=settings["rubika_session"],
+        rubika_target=settings["rubika_target"],
+    )
 
     try:
         if is_cancelled(task_id):
+            log_worker_event(task, "task_cancelled_before_upload", level="WARNING")
             raise CancelledTaskError("Cancelled before upload started.")
 
         ensure_session(settings["rubika_session"])
@@ -591,6 +719,7 @@ def process_task(task: dict) -> None:
             file_name=send_name,
         )
     except CancelledTaskError:
+        log_worker_event(task, "task_cancelled", level="WARNING")
         cleanup_local_file(str(send_path))
         clear_cancelled(task_id)
         update_telegram_status(
@@ -602,6 +731,12 @@ def process_task(task: dict) -> None:
         )
         return
     except Exception:
+        log_worker_event(
+            task,
+            "task_error",
+            level="ERROR",
+            traceback=traceback.format_exc(limit=8),
+        )
         clear_cancelled(task_id)
         raise
 
@@ -612,6 +747,7 @@ def process_task(task: dict) -> None:
     task["eta_text"] = None
     save_processing(task)
     elapsed_text = task_elapsed_text(task)
+    log_worker_event(task, "task_success", elapsed_text=elapsed_text)
     update_telegram_status(
         task,
         stage="✅ Uploaded",
@@ -652,6 +788,13 @@ def worker_loop():
     atexit.register(clear_worker_pid)
     recover_cancelled_processing_task()
     print("Rubika worker started.")
+    append_log_event(
+        "rubika_worker",
+        "worker_started",
+        pid=os.getpid(),
+        max_retries=MAX_RETRIES,
+        finalize_retries=RUBIKA_FINALIZE_RETRIES,
+    )
 
     while True:
         task = pop_first_task()
@@ -661,11 +804,13 @@ def worker_loop():
             continue
 
         save_processing(task)
+        log_worker_event(task, "task_popped")
 
         try:
             process_task(task)
         except CancelledTaskError:
             processing_task = load_processing() or task
+            log_worker_event(processing_task, "worker_cancelled_task", level="WARNING")
             clear_cancelled(processing_task.get("task_id", ""))
             update_telegram_status(
                 processing_task,
@@ -680,6 +825,14 @@ def worker_loop():
             normalize_failed_progress(processing_task)
             save_processing(processing_task)
             error_text = compact_error_text(e)
+            log_worker_event(
+                processing_task,
+                "worker_failed_task",
+                level="ERROR",
+                error=error_text,
+                error_type=type(e).__name__,
+                traceback=traceback.format_exc(limit=8),
+            )
             append_failed(processing_task, error_text)
             update_telegram_status(
                 processing_task,
