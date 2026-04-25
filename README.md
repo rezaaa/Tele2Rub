@@ -53,7 +53,6 @@ Available commands:
 - `/settings` - show the current Rubika session and upload destination
 - `/set_rubika` - start Rubika number setup in Telegram
 - `/set_rubika <phone_number>` - start Rubika number setup directly with a phone number
-- `/use_saved` - send new uploads to Saved Messages
 - `/status` - show active downloads, active upload, queue, failed count, and local storage usage
 - `/transfers` - show current downloads, current upload, queued items, and retryable failed transfers
 - `/cleanup` - preview removable files in `downloads/`

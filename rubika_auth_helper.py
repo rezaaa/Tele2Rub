@@ -93,16 +93,15 @@ def build_input_handler(phone_number: str):
         prompt_text = (prompt or "").strip()
         prompt_lower = prompt_text.lower()
 
-        if "phone" in prompt_lower or "number" in prompt_lower:
-            print("__AUTH_PHONE_AUTO__", flush=True)
-            return phone_number
-
         if "correct" in prompt_lower and ("y or n" in prompt_lower or "[y" in prompt_lower):
             print("__AUTH_CONFIRM_AUTO__", flush=True)
             return "y"
 
         if "code" in prompt_lower or "otp" in prompt_lower or "verify" in prompt_lower:
             print("__AUTH_OTP_PROMPT__", flush=True)
+        elif "phone" in prompt_lower or "number" in prompt_lower:
+            print("__AUTH_PHONE_AUTO__", flush=True)
+            return phone_number
         elif prompt_text:
             print(f"__AUTH_PROMPT__:{prompt_text}", flush=True)
 

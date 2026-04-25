@@ -112,7 +112,6 @@ BOT_COMMANDS = [
     BotCommand("status", "Show queue and storage status"),
     BotCommand("transfers", "List active and queued transfers"),
     BotCommand("set_rubika", "Start Rubika number setup"),
-    BotCommand("use_saved", "Send uploads to Saved Messages"),
     BotCommand("retry", "Retry a failed transfer"),
     BotCommand("retry_all", "Retry all failed transfers"),
     BotCommand("cleanup", "Clean safe download leftovers"),
@@ -211,7 +210,6 @@ def settings_action_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("📱 Change Account", callback_data="settings:session")],
-            [InlineKeyboardButton("💬 Send To Saved Messages", callback_data="settings:saved")],
         ]
     )
 
@@ -224,24 +222,20 @@ def auth_setup_keyboard() -> InlineKeyboardMarkup:
 
 def build_settings_text(note: str | None = None) -> str:
     settings = load_runtime_settings()
-    destination_label = format_destination_label(settings)
     lines = [
         "<b>⚙️ Rubika Settings</b>",
         "",
         "Control which Rubika account receives uploads.",
         "",
         f"📱 <b>Current Account:</b> {ltr_code(settings['rubika_session'])}",
-        f"📬 <b>Current Destination:</b> {ltr_code(destination_label)}",
+        f"📬 <b>Upload Destination:</b> {ltr_code('Saved Messages')}",
     ]
 
     lines.extend(
         [
             "",
-            "<b>What Each Button Does</b>",
-            "📱 Change Account: log in to a different Rubika number with phone + OTP.",
-            "💬 Send To Saved Messages: upload new files to your own Saved Messages.",
-            "",
-            "New uploads and retries use the current settings above.",
+            "Uploads always go to Saved Messages.",
+            "Use the button below to change the Rubika account with phone + OTP.",
         ]
     )
 
@@ -497,6 +491,31 @@ async def monitor_rubika_auth_process(chat_id: int, setup_id: str, process) -> N
             )
             continue
 
+        if text.startswith("__AUTH_PROMPT__:"):
+            prompt_text = text.split(":", 1)[1].strip() or "Rubika requested verification input."
+            current = AUTH_SETUPS.get(chat_id)
+            if (
+                not current
+                or current.get("setup_id") != setup_id
+                or current.get("process") is not process
+            ):
+                return
+            current["stage"] = "await_otp"
+            await cleanup_auth_temp_messages(chat_id)
+            await send_auth_temp_message_to_chat(
+                chat_id,
+                "\n".join(
+                    [
+                        "🔐 Rubika is waiting for verification input.",
+                        prompt_text,
+                        "",
+                        "Send the requested code here.",
+                    ]
+                ),
+                auth_setup_keyboard(),
+            )
+            continue
+
         if text == "__AUTH_SUCCESS__":
             success = True
             break
@@ -585,14 +604,6 @@ async def maybe_handle_auth_input(message: Message) -> bool:
         return True
 
     return False
-
-
-async def update_saved_messages_setting(message: Message) -> None:
-    save_runtime_settings(load_runtime_settings())
-    await send_settings_panel(
-        message,
-        note="✅ Upload destination changed to Saved Messages.",
-    )
 
 
 async def send_menu(message: Message) -> None:
@@ -1643,14 +1654,6 @@ async def set_rubika_handler(client: Client, message: Message):
     await start_rubika_auth_process(message, " ".join(message.command[1:]))
 
 
-@app.on_message(filters.private & filters.command("use_saved"))
-async def use_saved_handler(client: Client, message: Message):
-    if not await ensure_authorized_message(message):
-        return
-    await ensure_bot_commands(client)
-    await update_saved_messages_setting(message)
-
-
 @app.on_message(filters.private & filters.command("status"))
 async def status_handler(client: Client, message: Message):
     if not await ensure_authorized_message(message):
@@ -1905,8 +1908,6 @@ async def settings_callback_handler(client: Client, callback_query: CallbackQuer
 
     if action == "session":
         await prompt_rubika_phone_setup(callback_query.message)
-    elif action == "saved":
-        await update_saved_messages_setting(callback_query.message)
 
 
 @app.on_callback_query(filters.regex(r"^auth:cancel$"))
