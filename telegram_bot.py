@@ -270,7 +270,7 @@ def rubika_session_phone(session_name: str) -> str | None:
         except sqlite3.Error:
             continue
         if row and row[0]:
-            return str(row[0]).strip()
+            return normalize_phone_number(str(row[0]))
 
     return None
 
@@ -278,6 +278,13 @@ def rubika_session_phone(session_name: str) -> str | None:
 def load_settings_with_phone() -> dict:
     settings = load_runtime_settings()
     if settings.get("rubika_phone"):
+        try:
+            normalized_phone = normalize_phone_number(settings["rubika_phone"])
+        except ValueError:
+            return settings
+        if normalized_phone != settings["rubika_phone"]:
+            settings["rubika_phone"] = normalized_phone
+            return save_runtime_settings(settings)
         return settings
 
     phone = rubika_session_phone(settings["rubika_session"])
