@@ -4,6 +4,7 @@ import asyncio
 import os
 import re
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
@@ -202,7 +203,7 @@ async def ensure_authorized_callback(callback_query: CallbackQuery) -> bool:
 
 
 def build_menu_text() -> str:
-    settings = load_runtime_settings()
+    settings = load_settings_with_phone()
     return "\n".join(
         [
             "<b>⛵️ Walrus</b>",
@@ -252,6 +253,39 @@ def format_destination_label(settings: dict) -> str:
 
 def rubika_session_exists() -> bool:
     return has_rubika_session(load_runtime_settings()["rubika_session"])
+
+
+def rubika_session_phone(session_name: str) -> str | None:
+    candidates = [Path(session_name)]
+    if not candidates[0].is_absolute():
+        candidates[0] = BASE_DIR / candidates[0]
+    candidates.append(Path(f"{candidates[0]}.rp"))
+
+    for path in candidates:
+        if not path.exists() or not path.is_file():
+            continue
+        try:
+            with sqlite3.connect(path) as connection:
+                row = connection.execute("select phone from session limit 1").fetchone()
+        except sqlite3.Error:
+            continue
+        if row and row[0]:
+            return str(row[0]).strip()
+
+    return None
+
+
+def load_settings_with_phone() -> dict:
+    settings = load_runtime_settings()
+    if settings.get("rubika_phone"):
+        return settings
+
+    phone = rubika_session_phone(settings["rubika_session"])
+    if not phone:
+        return settings
+
+    settings["rubika_phone"] = phone
+    return save_runtime_settings(settings)
 
 
 def worker_process_is_alive() -> bool:
@@ -323,7 +357,7 @@ def auth_setup_keyboard() -> InlineKeyboardMarkup:
 
 
 def build_settings_text(note: str | None = None) -> str:
-    settings = load_runtime_settings()
+    settings = load_settings_with_phone()
     active_phone = settings.get("rubika_phone") or "Not set"
     lines = [
         "<b>⚙️ Rubika Settings</b>",
