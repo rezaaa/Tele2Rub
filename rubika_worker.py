@@ -48,10 +48,13 @@ RUBIKA_FINALIZE_RETRY_DELAY = float(os.getenv("RUBIKA_FINALIZE_RETRY_DELAY", "2"
 ensure_storage_dirs()
 
 
-MEDIA_EXTENSIONS = {
+UPLOAD_EXTENSIONS = {
     ".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".m4v",
     ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp",
     ".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac",
+    ".pdf", ".txt", ".csv", ".json",
+    ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+    ".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz",
 }
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".m4v"}
 
@@ -91,7 +94,7 @@ def format_destination_label(settings: dict) -> str:
 
 
 def should_keep_extension(filename: str) -> bool:
-    return Path(filename).suffix.lower() in MEDIA_EXTENSIONS
+    return Path(filename).suffix.lower() in UPLOAD_EXTENSIONS
 
 
 def update_telegram_status(
@@ -210,7 +213,7 @@ def notify_transfer_complete(task: dict, elapsed_text: str | None, settings: dic
     file_name = task.get("file_name", Path(task.get("path", "")).name or "file")
     lines = [
         "<b>✅ Transfer Complete</b>",
-        f"🎞 <b>Video:</b> <code>{escape(file_name)}</code>",
+        f"📄 <b>File:</b> <code>{escape(file_name)}</code>",
         f"📬 <b>Destination:</b> <code>{escape(format_destination_label(settings))}</code>",
     ]
 
@@ -365,9 +368,9 @@ def compact_error_text(error: Exception | str) -> str:
 
 def build_fallback_upload_name(task: dict, file_path: str, current_name: str | None = None) -> str:
     original_suffix = Path(current_name or file_path).suffix.lower()
-    suffix = original_suffix if original_suffix in MEDIA_EXTENSIONS else ".mp4"
+    suffix = original_suffix if original_suffix in UPLOAD_EXTENSIONS else ".bin"
     task_id = (task.get("task_id") or "file").strip()[:16] or "file"
-    return safe_filename(f"{task_id}{suffix}", f"{task_id}.mp4")
+    return safe_filename(f"{task_id}{suffix}", f"{task_id}.bin")
 
 
 def rubika_inline_type(task: dict, file_path: str, file_name: str | None = None) -> str:
@@ -467,7 +470,7 @@ def make_upload_progress_callback(task: dict, attempt: int):
             upload_status=(
                 "Finalizing the upload in Rubika."
                 if raw_percent == 100
-                else "Sending video to Rubika."
+                else "Sending file to Rubika."
             ),
             attempt_text=task["attempt_text"],
         )
@@ -607,7 +610,7 @@ def process_task(task: dict) -> None:
         update_telegram_status(
             task,
             stage="📤 Upload Queue",
-            upload_status=f"Preparing the video for upload to {format_destination_label(settings)}.",
+            upload_status=f"Preparing the file for upload to {format_destination_label(settings)}.",
         )
 
         task["file_name"] = send_name
@@ -647,9 +650,9 @@ def process_task(task: dict) -> None:
         task,
         stage="✅ Uploaded",
         upload_status=(
-            f"Video uploaded to {format_destination_label(settings)} successfully in {elapsed_text}."
+            f"File uploaded to {format_destination_label(settings)} successfully in {elapsed_text}."
             if elapsed_text
-            else f"Video uploaded to {format_destination_label(settings)} successfully."
+            else f"File uploaded to {format_destination_label(settings)} successfully."
         ),
         attempt_text=task.get("attempt_text"),
         action=None,

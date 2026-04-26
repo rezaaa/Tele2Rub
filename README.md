@@ -1,6 +1,6 @@
 # Walrus
 
-Send a video to a Telegram bot and have it uploaded to Rubika Saved Messages.
+Send a file to a Telegram bot and have it uploaded to Rubika Saved Messages.
 
 ## Disclaimer
 
@@ -10,9 +10,9 @@ You are responsible for using it in a way that respects platform rules, local la
 
 ## Features
 
-- Accepts video messages in Telegram private chat
-- Accepts direct video file links such as `https://...mp4` and `file:///...mp4`
-- Accepts multiple direct video file links in one message and queues each one
+- Accepts videos, documents, audio, photos, and other Telegram file messages in private chat
+- Accepts direct file links such as `https://...pdf`, `https://...zip`, and `file:///...mp4`
+- Accepts multiple direct file links in one message and queues each one
 - Sends a final summary message after a multi-link batch finishes intake
 - Keeps a local upload queue to avoid overlapping jobs
 - Shows live download and upload progress
@@ -23,7 +23,7 @@ You are responsible for using it in a way that respects platform rules, local la
 - Sends a completion notification when a transfer finishes successfully
 - Shows total elapsed transfer time on successful uploads
 - Lets you switch the active Rubika number/session from Telegram
-- Uploads videos with their original filename
+- Uploads files with their original filename
 
 ## Requirements
 
@@ -199,11 +199,12 @@ Successful transfers:
 
 Direct link uploads:
 
-- send a message containing a direct video file URL
-- you can include multiple direct video URLs in one message
+- send a message containing a direct file URL
+- you can include multiple direct file URLs in one message
 - when a multi-link batch finishes, the bot sends one summary with queued, failed, and cancelled counts
 - supported schemes: `https://`, `http://`, and `file://`
-- the link should point to the actual video file, not a webpage
+- the link should point to the actual file, not a webpage
+- supported direct-link extensions include common video, image, audio, document, PDF, and archive formats such as `.pdf` and `.zip`
 
 ## Retry Policy
 
@@ -233,7 +234,7 @@ Behavior:
 
 Runtime files:
 
-- `downloads/` - temporary downloaded videos
+- `downloads/` - temporary downloaded files
 - `queue/tasks.jsonl` - pending jobs
 - `queue/processing.json` - the job currently being uploaded
 - `queue/failed.jsonl` - failed jobs log
@@ -272,7 +273,7 @@ This project started after a few storage/upload experiments:
 
 Walrus uses a simple queue-based flow:
 
-1. The Telegram bot receives a video in a private chat, or a direct video file URL in a text message.
+1. The Telegram bot receives a file in a private chat, or a direct file URL in a text message.
 2. The file is downloaded into `downloads/`.
 3. A task is added to `queue/tasks.jsonl`.
 4. The Rubika worker uploads the file.

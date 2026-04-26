@@ -86,7 +86,7 @@ BTN_CLEANUP = "🧹 Cleanup"
 BTN_CANCEL = "🛑 Cancel"
 BTN_SETTINGS = "⚙️ Settings"
 MENU_BUTTONS = {BTN_STATUS, BTN_TRANSFERS, BTN_CLEANUP, BTN_CANCEL, BTN_SETTINGS}
-DIRECT_VIDEO_EXTENSIONS = {
+VIDEO_EXTENSIONS = {
     ".mp4",
     ".mkv",
     ".avi",
@@ -94,6 +94,43 @@ DIRECT_VIDEO_EXTENSIONS = {
     ".webm",
     ".flv",
     ".m4v",
+}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
+AUDIO_EXTENSIONS = {".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac"}
+DOCUMENT_EXTENSIONS = {
+    ".pdf",
+    ".txt",
+    ".csv",
+    ".json",
+    ".doc",
+    ".docx",
+    ".xls",
+    ".xlsx",
+    ".ppt",
+    ".pptx",
+}
+ARCHIVE_EXTENSIONS = {".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz"}
+DIRECT_FILE_EXTENSIONS = (
+    VIDEO_EXTENSIONS
+    | IMAGE_EXTENSIONS
+    | AUDIO_EXTENSIONS
+    | DOCUMENT_EXTENSIONS
+    | ARCHIVE_EXTENSIONS
+)
+DIRECT_FILE_CONTENT_TYPES = {
+    "application/pdf",
+    "application/zip",
+    "application/x-zip-compressed",
+    "application/x-rar-compressed",
+    "application/x-7z-compressed",
+    "application/x-tar",
+    "application/gzip",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/msword",
+    "application/vnd.ms-excel",
+    "application/vnd.ms-powerpoint",
 }
 URL_PATTERN = re.compile(r"(?P<url>(?:https?|file)://\S+)", re.IGNORECASE)
 DIRECT_DOWNLOAD_MAX_RETRIES = 5
@@ -165,7 +202,7 @@ def build_menu_text() -> str:
     return "\n".join(
         [
             "<b>⛵️ Walrus</b>",
-            "📤 <b>Send a video or direct video link</b> and I will upload it to Rubika.",
+            "📤 <b>Send a file or direct file link</b> and I will upload it to Rubika.",
             "",
             f"📱 <b>Rubika Session:</b> {ltr_code(settings['rubika_session'])}",
             f"📬 <b>Destination:</b> {ltr_code(format_destination_label(settings))}",
@@ -762,13 +799,13 @@ def cleanup_candidates() -> list[Path]:
 
 def compact_task_card(prefix: str, task: dict, status: str = "") -> str:
     task_id = task.get("task_id", "-")
-    file_name = Path(task.get("file_name") or task.get("path") or "video").name
+    file_name = Path(task.get("file_name") or task.get("path") or "file").name
     stem, suffix = split_name(file_name)
-    display_name = safe_filename(f"{stem[:30]}{suffix}", "video")
+    display_name = safe_filename(f"{stem[:30]}{suffix}", "file")
     size = human_size(int(task.get("file_size", 0) or 0))
     lines = [
         f"{prefix} <b>ID:</b> {ltr_code(task_id)}",
-        f"🎞 <b>Video:</b> {ltr_code(display_name)}",
+        f"📄 <b>File:</b> {ltr_code(display_name)}",
         f"📦 <b>Size:</b> {ltr_code(size)}",
     ]
 
@@ -780,9 +817,9 @@ def compact_task_card(prefix: str, task: dict, status: str = "") -> str:
 
 def compact_button_label(prefix: str, task: dict) -> str:
     task_id = task.get("task_id", "-")
-    file_name = Path(task.get("file_name") or task.get("path") or "video").name
+    file_name = Path(task.get("file_name") or task.get("path") or "file").name
     stem, suffix = split_name(file_name)
-    display_name = safe_filename(f"{stem[:18]}{suffix}", "video")
+    display_name = safe_filename(f"{stem[:18]}{suffix}", "file")
     return f"{prefix} {display_name} - {task_id}"
 
 
@@ -1098,6 +1135,7 @@ def build_cleanup_preview() -> str:
 def get_media(message: Message):
     media_types = [
         ("video", message.video),
+        ("document", message.document),
         ("audio", message.audio),
         ("voice", message.voice),
         ("photo", message.photo),
@@ -1149,7 +1187,7 @@ def summarize_batch_item(result: dict) -> str:
     }
     icon = icon_map.get(result.get("status"), "•")
     status = status_map.get(result.get("status"), "Updated")
-    file_name = safe_filename(result.get("file_name"), "video.mp4")
+    file_name = safe_filename(result.get("file_name"), "file.bin")
     task_id = result.get("task_id", "-")
     return f"{icon} {ltr_code(file_name)} {ltr_code(task_id)} {status}"
 
@@ -1178,19 +1216,27 @@ def build_batch_summary_text(results: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def is_direct_video_filename(name: str) -> bool:
-    return Path(name).suffix.lower() in DIRECT_VIDEO_EXTENSIONS
+def is_direct_file_filename(name: str) -> bool:
+    return Path(name).suffix.lower() in DIRECT_FILE_EXTENSIONS
 
 
-def build_url_download_filename(url: str, task_id: str, fallback_suffix: str = ".mp4") -> str:
-    original_name = normalize_upload_filename(path_name_from_url(url), f"video{fallback_suffix}")
-    stem, suffix = split_name(original_name or "video")
+def is_supported_file_content_type(content_type: str) -> bool:
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    return (
+        media_type.startswith(("video/", "audio/", "image/"))
+        or media_type in DIRECT_FILE_CONTENT_TYPES
+    )
 
-    if suffix.lower() not in DIRECT_VIDEO_EXTENSIONS:
-        suffix = fallback_suffix if fallback_suffix in DIRECT_VIDEO_EXTENSIONS else ".mp4"
 
-    unique_name = f"{(stem or 'video')[:120]}_{task_id}{suffix}"
-    return safe_filename(unique_name, f"video_{task_id}{suffix}")
+def build_url_download_filename(url: str, task_id: str, fallback_suffix: str = ".bin") -> str:
+    original_name = normalize_upload_filename(path_name_from_url(url), f"file{fallback_suffix}")
+    stem, suffix = split_name(original_name or "file")
+
+    if suffix.lower() not in DIRECT_FILE_EXTENSIONS:
+        suffix = fallback_suffix if fallback_suffix in DIRECT_FILE_EXTENSIONS else ".bin"
+
+    unique_name = f"{(stem or 'file')[:120]}_{task_id}{suffix}"
+    return safe_filename(unique_name, f"file_{task_id}{suffix}")
 
 
 class DirectDownloadCancelled(RuntimeError):
@@ -1246,6 +1292,7 @@ def build_download_filename(message: Message, media_type: str, media) -> str:
         "animation": ".mp4",
         "video_note": ".mp4",
         "sticker": ".webp",
+        "document": ".bin",
     }
     default_extension = default_extensions.get(media_type, ".bin")
 
@@ -1461,7 +1508,7 @@ def make_download_progress_callback(task_id: str, status_message: Message, task_
             stage="⬇️ Downloading",
             download_percent=percent,
             upload_percent=0,
-            upload_status="The video will enter the upload queue after download.",
+            upload_status="The file will enter the upload queue after download.",
             speed_text=speed_text,
             eta_text=eta_text,
         )
@@ -1541,7 +1588,7 @@ def make_direct_download_progress_callback(task_id: str, status_message: Message
             stage="⬇️ Downloading",
             download_percent=percent,
             upload_percent=0,
-            upload_status="Downloading the video from the link.",
+            upload_status="Downloading the file from the link.",
             speed_text=speed_text,
             eta_text=eta_text,
         )
@@ -1572,8 +1619,8 @@ def download_file_url(
         source_path = Path(unquote(parsed.path or ""))
         if not source_path.exists() or not source_path.is_file():
             raise RuntimeError("Local file URL not found.")
-        if not is_direct_video_filename(source_path.name):
-            raise RuntimeError("The file URL must point to a video file.")
+        if not is_direct_file_filename(source_path.name):
+            raise RuntimeError("The file URL must point to a supported file type.")
 
         total = source_path.stat().st_size
         copied = 0
@@ -1592,7 +1639,7 @@ def download_file_url(
         return download_path
 
     if scheme not in {"http", "https"}:
-        raise RuntimeError("Only http(s):// and file:// video URLs are supported.")
+        raise RuntimeError("Only http(s):// and file:// file URLs are supported.")
 
     last_error: Exception | None = None
 
@@ -1614,11 +1661,11 @@ def download_file_url(
 
                 content_type = response.headers.get("content-type", "")
                 if not (
-                    content_type.lower().startswith("video/")
-                    or is_direct_video_filename(path_name_from_url(response.url))
-                    or is_direct_video_filename(download_path.name)
+                    is_supported_file_content_type(content_type)
+                    or is_direct_file_filename(path_name_from_url(response.url))
+                    or is_direct_file_filename(download_path.name)
                 ):
-                    raise RuntimeError("The URL must point to a direct video file.")
+                    raise RuntimeError("The URL must point to a direct supported file.")
 
                 total = response_total_size(response, 0)
                 if total > 0:
@@ -1803,7 +1850,7 @@ async def retry_task_by_id(client: Client, message: Message, task_id: str) -> No
             "\n".join(
                 [
                     f"⚠️ Local file not found: {task_id}",
-                    "It was probably cleaned up. Please send the video again.",
+                    "It was probably cleaned up. Please send the file again.",
                 ]
             ),
             reply_markup=MENU_KEYBOARD,
@@ -2090,6 +2137,7 @@ async def cancel_handler(client: Client, message: Message):
     filters.private
     & (
         filters.video
+        | filters.document
         | filters.audio
         | filters.voice
         | filters.photo
@@ -2120,7 +2168,7 @@ async def media_handler(client: Client, message: Message):
             stage="⏳ Preparing Download",
             download_percent=0,
             upload_percent=0,
-            upload_status="The video will start downloading soon.",
+            upload_status="The file will start downloading soon.",
         ),
         parse_mode=enums.ParseMode.HTML,
         reply_markup=status_action_keyboard(task_id, "cancel"),
@@ -2209,13 +2257,13 @@ async def media_handler(client: Client, message: Message):
         ACTIVE_DOWNLOADS.pop(task_id, None)
 
 
-async def process_direct_video_url(message: Message, url: str) -> dict:
+async def process_direct_file_url(message: Message, url: str) -> dict:
     task_id = uuid.uuid4().hex[:10]
     fallback_suffix = Path(path_name_from_url(url)).suffix.lower()
-    if fallback_suffix not in DIRECT_VIDEO_EXTENSIONS:
-        fallback_suffix = ".mp4"
+    if fallback_suffix not in DIRECT_FILE_EXTENSIONS:
+        fallback_suffix = ".bin"
 
-    file_name = f"{task_id}{fallback_suffix}"
+    file_name = build_url_download_filename(url, task_id, fallback_suffix)
     download_path = DOWNLOAD_DIR / file_name
     started_at = time.time()
     task_meta = {"file_name": file_name, "file_size": 0}
@@ -2228,7 +2276,7 @@ async def process_direct_video_url(message: Message, url: str) -> dict:
             stage="⏳ Preparing Download",
             download_percent=0,
             upload_percent=0,
-            upload_status="The video link will start downloading soon.",
+            upload_status="The file link will start downloading soon.",
         ),
         parse_mode=enums.ParseMode.HTML,
         reply_markup=status_action_keyboard(task_id, "cancel"),
@@ -2270,7 +2318,7 @@ async def process_direct_video_url(message: Message, url: str) -> dict:
             status=status,
             file_name=file_name,
             file_size=file_size,
-            media_type="video",
+            media_type="file",
             started_at=started_at,
             downloaded_path=downloaded_path,
             caption="",
@@ -2308,7 +2356,7 @@ async def process_direct_video_url(message: Message, url: str) -> dict:
                     stage="❌ Download Failed",
                     download_percent=active.get("download_percent", 0),
                     upload_percent=0,
-                    upload_status="The link download did not complete.",
+                    upload_status="The file link download did not complete.",
                     note=str(e),
                 ),
             )
@@ -2318,7 +2366,7 @@ async def process_direct_video_url(message: Message, url: str) -> dict:
 
 
 @app.on_message(filters.private & filters.text)
-async def direct_video_url_handler(_client: Client, message: Message):
+async def direct_file_url_handler(_client: Client, message: Message):
     if not await ensure_authorized_message(message):
         return
 
@@ -2339,7 +2387,7 @@ async def direct_video_url_handler(_client: Client, message: Message):
             reply_markup=MENU_KEYBOARD,
         )
 
-    results = await asyncio.gather(*(process_direct_video_url(message, url) for url in urls))
+    results = await asyncio.gather(*(process_direct_file_url(message, url) for url in urls))
 
     if len(urls) > 1:
         await message.reply_text(
