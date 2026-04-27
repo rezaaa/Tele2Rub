@@ -1,4 +1,13 @@
 /.pycache/
 __pycache__/
 *.pyc
+.env
+venv/
 docs/
+downloads/
+queue/
+sessions/
+*.session
+*.session-journal
+run.local.sh
+rubsession.rp

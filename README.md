@@ -52,6 +52,7 @@ Edit `.env` in the project root:
 API_ID=your_telegram_api_id
 API_HASH=your_telegram_api_hash
 BOT_TOKEN=your_telegram_bot_token
+TELEGRAM_SESSION=walrus
 RUBIKA_SESSION=rubsession
 OWNER_TELEGRAM_ID=123456789
 ```
@@ -61,9 +62,11 @@ Variables:
 - `API_ID` - from https://my.telegram.org
 - `API_HASH` - from https://my.telegram.org
 - `BOT_TOKEN` - from BotFather
+- `TELEGRAM_SESSION` - optional Pyrogram session name; defaults to `walrus`
 - `RUBIKA_SESSION` - session name or path used by `rubpy`
 - `OWNER_TELEGRAM_ID` - optional; if set, only this Telegram user ID can use the bot
 
+`TELEGRAM_SESSION` controls the Telegram/Pyrogram session file name, such as `walrus.session`.
 `RUBIKA_SESSION` controls the session file name that `rubpy` uses on disk, such as `rubsession.rp`.
 Changing the Rubika account from Telegram replaces the authenticated session file for that configured session name. It does not require editing `.env` or restarting the bot.
 

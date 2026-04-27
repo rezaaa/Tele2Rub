@@ -124,7 +124,13 @@ def normalize_phone_number(phone_number: str) -> str:
     normalized = match.group(1)
     if normalized.startswith("0"):
         normalized = f"98{normalized[1:]}"
-    return f"+{normalized}"
+    elif normalized.startswith("9") and len(normalized) == 10:
+        normalized = f"98{normalized}"
+    return normalized
+
+
+def normalize_verification_code(code: str) -> str:
+    return convert_farsi_digits(code).strip().replace(" ", "").replace("-", "")
 
 
 def read_user_input(error_message: str) -> str:
@@ -179,7 +185,7 @@ async def run_auth(session_name: str, phone_number: str) -> None:
 
         public_key, client.private_key = Crypto.create_keys()
         print("__AUTH_OTP_PROMPT__", flush=True)
-        phone_code = read_user_input("OTP input stream closed.")
+        phone_code = normalize_verification_code(read_user_input("OTP input stream closed."))
 
         sign_in_result = await client.sign_in(
             phone_code=phone_code,

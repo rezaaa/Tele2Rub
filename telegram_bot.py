@@ -64,6 +64,7 @@ API_HASH = os.getenv("API_HASH", "").strip()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 OWNER_TELEGRAM_ID = int(os.getenv("OWNER_TELEGRAM_ID", "0"))
 RUBIKA_CONNECT_TIMEOUT = int(os.getenv("RUBIKA_CONNECT_TIMEOUT", "25") or 25)
+TELEGRAM_SESSION = os.getenv("TELEGRAM_SESSION", "walrus").strip() or "walrus"
 
 ensure_storage_dirs()
 
@@ -72,7 +73,7 @@ if not API_ID or not API_HASH or not BOT_TOKEN:
     raise RuntimeError("Please set API_ID, API_HASH and BOT_TOKEN in .env")
 
 app = Client(
-    "walrus",
+    TELEGRAM_SESSION,
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
@@ -613,6 +614,8 @@ def normalize_phone_number(phone_number: str) -> str:
 
     if phone.startswith("0"):
         phone = f"98{phone[1:]}"
+    elif phone.startswith("9") and len(phone) == 10:
+        phone = f"98{phone}"
 
     if not re.fullmatch(r"\d{7,15}", phone):
         raise ValueError("Invalid phone number.")
