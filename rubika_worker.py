@@ -44,13 +44,6 @@ ERROR_TEXT_LIMIT = 220
 RUBIKA_CONNECT_TIMEOUT = int(os.getenv("RUBIKA_CONNECT_TIMEOUT", "25") or 25)
 RUBIKA_FINALIZE_RETRIES = int(os.getenv("RUBIKA_FINALIZE_RETRIES", "3") or 3)
 RUBIKA_FINALIZE_RETRY_DELAY = float(os.getenv("RUBIKA_FINALIZE_RETRY_DELAY", "2") or 2)
-RUBIKA_UPLOAD_CHUNK_SIZE = int(os.getenv("RUBIKA_UPLOAD_CHUNK_SIZE", "1048576") or 1048576)
-RUBIKA_CHUNK_RETRIES = int(os.getenv("RUBIKA_CHUNK_RETRIES", "30") or 30)
-RUBIKA_CHUNK_RETRY_DELAY = float(os.getenv("RUBIKA_CHUNK_RETRY_DELAY", "2") or 2)
-RUBIKA_CHUNK_RETRY_DELAY_MAX = float(os.getenv("RUBIKA_CHUNK_RETRY_DELAY_MAX", "45") or 45)
-RUBIKA_REINIT_GRACE_RETRIES = int(os.getenv("RUBIKA_REINIT_GRACE_RETRIES", "5") or 5)
-RUBIKA_UPLOAD_STATE_KEY = "rubika_upload_session"
-RUBIKA_UPLOADED_FILE_KEY = "rubika_uploaded_file"
 
 ensure_storage_dirs()
 
@@ -75,10 +68,6 @@ class RubikaConnectTimeoutError(TimeoutError):
 
 
 class MissingRubikaSessionError(RuntimeError):
-    pass
-
-
-class RubikaUploadResetRequired(RuntimeError):
     pass
 
 
@@ -245,215 +234,6 @@ def notify_transfer_complete(task: dict, elapsed_text: str | None, settings: dic
     )
 
 
-def update_field(update, key: str, default=None):
-    if isinstance(update, dict):
-        return update.get(key, default)
-    return getattr(update, key, default)
-
-
-async def sleep_with_cancel(task_id: str, seconds: float) -> None:
-    remaining = max(0.0, seconds)
-    while remaining > 0:
-        if is_cancelled(task_id):
-            raise CancelledTaskError("Cancelled by user.")
-        interval = min(1.0, remaining)
-        await asyncio.sleep(interval)
-        remaining -= interval
-
-
-def valid_upload_state(state: dict, file_path: str, file_name: str, file_size: int) -> bool:
-    required = {"file_id", "dc_id", "upload_url", "access_hash_send", "next_part"}
-    return (
-        isinstance(state, dict)
-        and required.issubset(state)
-        and state.get("file_path") == file_path
-        and state.get("file_name") == file_name
-        and int(state.get("file_size", 0) or 0) == file_size
-        and int(state.get("chunk_size", 0) or 0) == RUBIKA_UPLOAD_CHUNK_SIZE
-    )
-
-
-def valid_uploaded_file(uploaded: dict, file_path: str, file_name: str) -> bool:
-    try:
-        file_size = Path(file_path).stat().st_size
-    except OSError:
-        return False
-    required = {"dc_id", "file_id", "access_hash_rec", "file_name", "size", "mime"}
-    return (
-        isinstance(uploaded, dict)
-        and required.issubset(uploaded)
-        and uploaded.get("file_name") == file_name
-        and int(uploaded.get("size", 0) or 0) == file_size
-    )
-
-
-async def request_upload_session(client, task: dict, file_path: str, file_name: str, file_size: int, mime: str) -> dict:
-    result = await client.request_send_file(file_name, file_size, mime)
-    state = {
-        "file_path": file_path,
-        "file_name": file_name,
-        "file_size": file_size,
-        "mime": mime,
-        "chunk_size": RUBIKA_UPLOAD_CHUNK_SIZE,
-        "total_parts": max(1, (file_size + RUBIKA_UPLOAD_CHUNK_SIZE - 1) // RUBIKA_UPLOAD_CHUNK_SIZE),
-        "next_part": 1,
-        "file_id": str(update_field(result, "id") or update_field(result, "file_id") or ""),
-        "dc_id": update_field(result, "dc_id"),
-        "upload_url": update_field(result, "upload_url"),
-        "access_hash_send": update_field(result, "access_hash_send"),
-    }
-    if not state["file_id"] or not state["upload_url"] or not state["access_hash_send"]:
-        raise RuntimeError("Rubika did not return upload session metadata.")
-    task[RUBIKA_UPLOAD_STATE_KEY] = state
-    save_processing(task)
-    return state
-
-
-async def post_upload_chunk(client, state: dict, data: bytes, part_number: int) -> dict:
-    async with client.connection.session.post(
-        url=state["upload_url"],
-        headers={
-            "auth": client.auth,
-            "file-id": state["file_id"],
-            "total-part": str(state["total_parts"]),
-            "part-number": str(part_number),
-            "chunk-size": str(len(data)),
-            "access-hash-send": state["access_hash_send"],
-        },
-        data=data,
-        proxy=getattr(client, "proxy", None),
-    ) as response:
-        if response.status >= 500:
-            body = " ".join((await response.text()).split())
-            raise RuntimeError(f"{response.status} server error while uploading chunk: {body[:120]}")
-        try:
-            payload = await response.json(content_type=None)
-        except TypeError:
-            payload = await response.json()
-        if response.status >= 400:
-            raise RuntimeError(f"{response.status} error while uploading chunk: {payload}")
-        return payload
-
-
-async def upload_chunk_with_retry(client, task: dict, state: dict, data: bytes, part_number: int) -> dict:
-    task_id = task.get("task_id", "")
-    last_error = None
-    for attempt in range(1, RUBIKA_CHUNK_RETRIES + 1):
-        if is_cancelled(task_id):
-            raise CancelledTaskError("Cancelled by user.")
-        try:
-            return await post_upload_chunk(client, state, data, part_number)
-        except Exception as error:
-            if isinstance(error, CancelledTaskError):
-                raise
-            last_error = error
-            delay = min(RUBIKA_CHUNK_RETRY_DELAY_MAX, RUBIKA_CHUNK_RETRY_DELAY * attempt)
-            task["speed_text"] = None
-            task["eta_text"] = None
-            save_processing(task)
-            update_telegram_status(
-                task,
-                stage="⚠️ Upload Paused",
-                upload_status=(
-                    f"Rubika chunk {part_number}/{state['total_parts']} failed "
-                    f"(retry {attempt}/{RUBIKA_CHUNK_RETRIES}). Waiting {int(delay)}s."
-                ),
-                note=compact_error_text(error),
-            )
-            if attempt >= RUBIKA_CHUNK_RETRIES:
-                break
-            await sleep_with_cancel(task_id, delay)
-    raise last_error if last_error else RuntimeError("Chunk upload failed.")
-
-
-async def emit_upload_progress(callback, total: int, current: int) -> None:
-    if not callback:
-        return
-    result = callback(total, current)
-    if asyncio.iscoroutine(result):
-        await result
-
-
-async def resilient_upload_file(client, task: dict, file_path: str, file_name: str, callback=None) -> dict:
-    path = Path(file_path)
-    file_size = path.stat().st_size
-    mime = path.suffix.lower().lstrip(".") or "bin"
-    state = task.get(RUBIKA_UPLOAD_STATE_KEY, {})
-    if not valid_upload_state(state, file_path, file_name, file_size):
-        state = await request_upload_session(client, task, file_path, file_name, file_size, mime)
-
-    task_id = task.get("task_id", "")
-    last_result: dict = {}
-    reinit_retries = 0
-
-    with path.open("rb") as source:
-        while int(state["next_part"]) <= int(state["total_parts"]):
-            if is_cancelled(task_id):
-                raise CancelledTaskError("Cancelled by user.")
-
-            part_number = int(state["next_part"])
-            source.seek((part_number - 1) * RUBIKA_UPLOAD_CHUNK_SIZE)
-            data = source.read(RUBIKA_UPLOAD_CHUNK_SIZE)
-            if not data:
-                break
-
-            last_result = await upload_chunk_with_retry(client, task, state, data, part_number)
-            status = str(last_result.get("status") or "").upper()
-            if status == "ERROR_TRY_AGAIN":
-                reinit_retries += 1
-                delay = min(RUBIKA_CHUNK_RETRY_DELAY_MAX, RUBIKA_CHUNK_RETRY_DELAY * reinit_retries)
-                if reinit_retries <= RUBIKA_REINIT_GRACE_RETRIES:
-                    update_telegram_status(
-                        task,
-                        stage="⚠️ Upload Paused",
-                        upload_status=(
-                            f"Rubika asked to reinitialize at chunk {part_number}/{state['total_parts']}. "
-                            f"Retrying the same chunk before restarting."
-                        ),
-                    )
-                    await sleep_with_cancel(task_id, delay)
-                    continue
-
-                update_telegram_status(
-                    task,
-                    stage="⚠️ Restarting Upload",
-                    upload_status="Rubika forced a new upload session, so the upload must restart from part 1.",
-                )
-                task.pop(RUBIKA_UPLOAD_STATE_KEY, None)
-                save_processing(task)
-                raise RubikaUploadResetRequired(
-                    "Rubika forced a new upload session; restarting upload from part 1."
-                )
-            if status and status != "OK":
-                raise RuntimeError(f"Rubika rejected chunk {part_number}: {last_result}")
-
-            reinit_retries = 0
-            completed = min(part_number * RUBIKA_UPLOAD_CHUNK_SIZE, file_size)
-            state["next_part"] = part_number + 1
-            state["completed_bytes"] = completed
-            task[RUBIKA_UPLOAD_STATE_KEY] = state
-            save_processing(task)
-            await emit_upload_progress(callback, file_size, completed)
-
-    if str(last_result.get("status") or "").upper() == "OK" and str(last_result.get("status_det") or "").upper() == "OK":
-        uploaded = {
-            "mime": mime,
-            "size": file_size,
-            "dc_id": state["dc_id"],
-            "file_id": state["file_id"],
-            "file_name": file_name,
-            "access_hash_rec": last_result.get("data", {}).get("access_hash_rec"),
-        }
-        if not uploaded["access_hash_rec"]:
-            raise RuntimeError("Rubika upload finished without access hash.")
-        task[RUBIKA_UPLOADED_FILE_KEY] = uploaded
-        task.pop(RUBIKA_UPLOAD_STATE_KEY, None)
-        save_processing(task)
-        return uploaded
-
-    raise RuntimeError(f"Rubika upload failed: {last_result}")
-
-
 async def send_document(
     session_name: str,
     target: str,
@@ -476,9 +256,11 @@ async def send_document(
         ) from exc
 
     try:
-        uploaded = task.get(RUBIKA_UPLOADED_FILE_KEY)
-        if not valid_uploaded_file(uploaded, file_path, upload_name):
-            uploaded = await resilient_upload_file(client, task, file_path, upload_name, callback)
+        uploaded = await client.upload(
+            file_path,
+            callback=callback,
+            file_name=upload_name,
+        )
 
         file_inline = dict(uploaded) if isinstance(uploaded, dict) else uploaded.to_dict
         inline_type = rubika_inline_type(task, file_path, upload_name)
@@ -493,9 +275,6 @@ async def send_document(
                         text=caption.strip() if caption and caption.strip() else None,
                         file_inline=candidate_file_inline,
                     )
-                    task.pop(RUBIKA_UPLOADED_FILE_KEY, None)
-                    task.pop(RUBIKA_UPLOAD_STATE_KEY, None)
-                    save_processing(task)
                     return result
                 except Exception as error:
                     last_error = error
@@ -551,12 +330,9 @@ def is_transient_upload_error(error_text: str) -> bool:
             "temporary failure",
             "network is unreachable",
             "error uploading chunk",
-            "chunk upload failed",
             "error_try_again",
             "error message try",
             "error_message_try",
-            "forced a new upload session",
-            "restarting upload",
             "too_requests",
             "too requests",
             "internal_problem",
@@ -730,9 +506,7 @@ def send_with_retry(
         if is_cancelled(task_id):
             raise CancelledTaskError("Cancelled by user.")
 
-        resuming_upload = bool(task.get(RUBIKA_UPLOAD_STATE_KEY) or task.get(RUBIKA_UPLOADED_FILE_KEY))
-        if not resuming_upload:
-            task["upload_percent"] = 0
+        task["upload_percent"] = 0
         task["attempt_text"] = f"{attempt} of {MAX_RETRIES}"
         task["speed_text"] = None
         task["eta_text"] = None
@@ -740,11 +514,7 @@ def send_with_retry(
         update_telegram_status(
             task,
             stage="🚀 Starting Upload",
-            upload_status=(
-                "Resuming the Rubika upload."
-                if resuming_upload
-                else "Connecting to Rubika."
-            ),
+            upload_status="Connecting to Rubika.",
             attempt_text=task["attempt_text"],
         )
 
@@ -779,14 +549,7 @@ def send_with_retry(
 
             transient = is_transient_upload_error(error_text)
             near_complete = int(task.get("upload_percent", 0) or 0) >= 95
-            has_upload_state = bool(task.get(RUBIKA_UPLOAD_STATE_KEY))
-            has_uploaded_file = bool(task.get(RUBIKA_UPLOADED_FILE_KEY))
-            fallback_name_retry = (
-                not used_fallback_name
-                and not transient
-                and not has_upload_state
-                and not has_uploaded_file
-            )
+            fallback_name_retry = not used_fallback_name
             retry_allowed = attempt < MAX_RETRIES and (
                 transient or near_complete or fallback_name_retry
             )
@@ -795,17 +558,11 @@ def send_with_retry(
                 upload_name = build_fallback_upload_name(task, file_path, upload_name)
                 used_fallback_name = True
                 task["upload_file_name"] = upload_name
-                task.pop(RUBIKA_UPLOAD_STATE_KEY, None)
-                task.pop(RUBIKA_UPLOADED_FILE_KEY, None)
 
             if retry_allowed:
                 delay = RETRY_DELAY * attempt
                 next_attempt_text = f"{attempt + 1} of {MAX_RETRIES}"
-                will_resume_upload = bool(
-                    task.get(RUBIKA_UPLOAD_STATE_KEY) or task.get(RUBIKA_UPLOADED_FILE_KEY)
-                )
-                if not will_resume_upload:
-                    task["upload_percent"] = 0
+                task["upload_percent"] = 0
                 task["attempt_text"] = next_attempt_text
                 task["speed_text"] = None
                 task["eta_text"] = None
